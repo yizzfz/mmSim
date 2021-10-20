@@ -2,6 +2,7 @@ import numpy as np
 import sys
 
 class Radar:
+    cnt = 0
     def __init__(self, pos=(0, 0, 0), f1=77e9, slope=40e12, ADC_rate=15e6, chirp_time=100e-6, phase_shift=0):
         self.f1 = f1
         self.slope = slope
@@ -12,7 +13,9 @@ class Radar:
         self.ADC_rate = ADC_rate
         self.chirp_time = chirp_time
         self.phase_shift = phase_shift
-        print(f'Radar configured {f1/1e9:.1f} GHz to {(f1+slope*chirp_time)/1e9:.1f} GHz')
+        self.name = f'{self.__class__.__name__}_{type(self).cnt}'
+        type(self).cnt += 1
+        print(f'[{self.name}] configured to {f1/1e9:.1f} GHz to {(f1+slope*chirp_time)/1e9:.1f} GHz')
         # self.wavelength = self.c/self.f1
 
     def distance_to(self, pos):

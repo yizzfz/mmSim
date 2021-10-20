@@ -30,6 +30,7 @@ class Pulse(Oscillation):
             self.path[j:j+motion_length] = pattern * self.vector
 
     # make a two sided pulse, pulse shape hardcoded as below
+    # default pulse length is 0.1s
     # peak top = 1.8x peak bottom
     # 0 to max : max to min : min to 0 = 6:5:4
     def make_pattern(self, length):

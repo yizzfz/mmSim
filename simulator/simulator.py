@@ -11,6 +11,9 @@ class Simulator:
         self.scene = scene
         for obj in self.scene:
             obj.register(self.T, self.fps)
+        self.name = f'{self.__class__.__name__}'
+        self.max_v = 1e-3*fps
+        print(f'[{self.name}] Allowed maximum velocity is {self.max_v} m/s')
 
     def run(self):
         signals, freqzs = [], []

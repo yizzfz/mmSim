@@ -1,4 +1,7 @@
 import numpy as np
+from scipy import signal
+import matplotlib.pyplot as plt
+
 def CFAR(fft_data, phase=False):
     mag = np.absolute(fft_data)
     mag = 10*np.log10(mag/np.max(mag))
@@ -51,3 +54,21 @@ def unwrap(signal):
         elif S[i-1] - S[i] > 1:
             S[i:] += 2
     return S 
+
+def highpass(x, order=10, cutoff=0.5):
+    b, a = signal.butter(order, cutoff, 'highpass')
+    y = signal.filtfilt(b, a, x)
+    return y
+
+def wavelet(x, fps, pulse_length=0.1):
+    # widths = np.arange(1, fps*pulse_length, 1)
+    # cwt = signal.cwt(x, signal.ricker, widths)
+    # plt.imshow(cwt, cmap='PRGn', aspect='auto', vmax=abs(cwt).max(), vmin=-abs(cwt).max())
+    # plt.show()
+    # import pdb; pdb.set_trace()
+    widths = [int(fps*pulse_length*0.2)]
+    y = signal.cwt(x, signal.ricker, widths)[0]
+    border = int(y.shape[0]*0.01)
+    y[:border] = y[border]
+    y[-border:] = y[-border]
+    return y

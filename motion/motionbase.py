@@ -2,9 +2,12 @@ import numpy as np
 import sys
 
 class Stationary:
-    def __init__(self):
+    cnt = 0
+    def __init__(self, name=None):
         self.registered = False
         self.path = None
+        self.name = f'{self.__class__.__name__}_{type(self).cnt}'
+        type(self).cnt += 1
 
     def move(self, pos):
         '''
@@ -49,6 +52,10 @@ class MotionBase(Stationary):
     def register(self, t, fps):
         super().register(t, fps)
         self.make_path()
+        max_d = 1e-3
+        d = np.linalg.norm(self.path[1:]-self.path[:-1], axis=1)
+        if np.max(d) > max_d:
+            print(f'[{self.name}] Warning: Peak velocity {np.max(d)*fps:.2f} m/s may cause ambiguous phase wrapping.')
 
 class MotionList(MotionBase):
     def __init__(self, motions: list):
