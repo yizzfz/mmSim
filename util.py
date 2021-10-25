@@ -2,15 +2,13 @@ import numpy as np
 from scipy import signal
 import matplotlib.pyplot as plt
 
-def CFAR(fft_data, phase=False):
+def CFAR(fft_data, win1=2, win2=4, phase=False):
     mag = np.absolute(fft_data)
     mag = 10*np.log10(mag/np.max(mag))
     phases = np.angle(fft_data)
     phases = (phases+2*np.pi) % (2*np.pi)
     n = fft_data.shape[0]
-    win1 = 0
-    win2 = 1
-    th = -6
+    th = -3
     res = []
 
     for i in range(n):
@@ -35,6 +33,7 @@ def CFAR(fft_data, phase=False):
             #     if dup:
             #         continue
             res.append((i, mag[i], phases[i]))
+    res = sorted(res, key=lambda x:x[1], reverse=True) 
     return res
 
 def FFT(signal, fs):

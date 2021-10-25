@@ -11,3 +11,5 @@ class Circle(Point):
         pts = np.stack(np.meshgrid(x, y, z), -1).reshape((-1, 3))
         dist = np.linalg.norm(pts-pos, axis=-1)
         self.pos = pts[dist<=radius]
+        self.size = self.pos.shape[0]
+        self.cen = pos
