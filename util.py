@@ -67,7 +67,7 @@ def wavelet(x, fps, pulse_length=0.1):
     # import pdb; pdb.set_trace()
     widths = [int(fps*pulse_length*0.2)]
     y = signal.cwt(x, signal.ricker, widths)[0]
-    border = int(y.shape[0]*0.01)
+    border = int(y.shape[0]*0.05)
     y[:border] = y[border]
     y[-border:] = y[-border]
     return y
