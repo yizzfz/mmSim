@@ -1,29 +1,40 @@
 import numpy as np
 import sys
+from collections.abc import Sequence
 
 class Radar:
     cnt = 0
-    def __init__(self, pos=(0, 0, 0), f1=77e9, slope=40e12, ADC_rate=15e6, chirp_time=100e-6, phase_shift=0):
+    def __init__(self, Tx_pos=(0, 0, 0), Rx_pos=None, f1=77e9, slope=40e12, ADC_rate=15e6, chirp_time=100e-6, phase_shift=0):
         self.f1 = f1
         self.slope = slope
-        self.pos = pos
+        self.Tx_pos = Tx_pos
+        self.Rx_pos = Rx_pos
         self.tx_f = f1
-        self.tx_p = 0
+        # self.tx_p = 0
         self.c = 3e8
         self.ADC_rate = ADC_rate
         self.chirp_time = chirp_time
         self.phase_shift = phase_shift
         self.name = f'{self.__class__.__name__}_{type(self).cnt}'
         type(self).cnt += 1
-        print(f'[{self.name}] configured to {f1/1e9:.1f} GHz to {(f1+slope*chirp_time)/1e9:.1f} GHz')
+        # print(f'[{self.name}] configured to {f1/1e9:.1f} GHz to {(f1+slope*chirp_time)/1e9:.1f} GHz')
         # self.wavelength = self.c/self.f1
 
-    def distance_to(self, pos):
-        dis = np.linalg.norm(np.array(self.pos)-np.array(pos))
+    def distance_between(self, pos1, pos2):
+        dis = np.linalg.norm(np.array(pos1)-np.array(pos2))
         return dis
 
+    def tof_to(self, pos):
+        dis1 = self.distance_between(self.Tx_pos, pos)
+        if self.Rx_pos is not None:
+            dis2 = self.distance_between(self.Rx_pos, pos)
+        else:
+            dis2 = dis1
+        tof = (dis1+dis2)/self.c
+        return tof
+
     def IF(self, t, tof):
-        return np.cos(2*np.pi*self.slope*tof*t+2*np.pi*self.f1*tof-np.pi*self.slope*tof*tof+self.phase_shift)
+        return np.exp(1j*(2*np.pi*self.slope*tof*t+2*np.pi*self.f1*tof-np.pi*self.slope*tof*tof+self.phase_shift))
 
     def freqz(self, tof):
         return self.slope*tof, (2*np.pi*self.f1*tof-np.pi*self.slope*tof*tof+self.phase_shift)%(2*np.pi)
@@ -37,11 +48,11 @@ class Radar:
             n_obj = obj.get_size()
             pos = obj.get_pos()
         n_sample = int(self.chirp_time * self.ADC_rate)
-        signal = np.zeros((n_obj, n_sample))
+        signal = np.zeros((n_obj, n_sample), dtype=complex)
         freq = np.zeros((n_obj, 2))
         for i, pos_i in enumerate(pos):
-            dis = self.distance_to(pos_i)
-            tof = 2*dis/self.c
+            # dis = self.distance_to(pos_i)
+            tof = self.tof_to(pos_i)
             # freq = tof*self.slope
             t = np.arange(0, self.chirp_time, 1/self.ADC_rate)
             signal[i] = self.IF(t, tof)
@@ -86,7 +97,7 @@ class Radar:
         '''
         n_total_objs = np.sum([o.get_size() for o in objs])
         n_sample = int(self.chirp_time * self.ADC_rate)
-        signal = np.zeros((self.steps, n_sample))
+        signal = np.zeros((self.steps, n_sample), dtype=complex)
         freqzs = np.zeros((self.steps, n_total_objs, 2))
         cnt = 0
         for obj in objs:
@@ -107,4 +118,30 @@ class Radar:
             sys.exit(1)
         self.T = time
         self.fps = fps
-        self.steps = time*fps
+        self.steps = int(time*fps)
+
+class RadarArray:
+    def __init__(self, Tx_pos=(0, 0, 0), layout='1443', f1=77e9, slope=40e12, ADC_rate=15e6, chirp_time=100e-6):
+        space = 3e8/f1/2    # wavelength / 2
+        xs1 = np.arange(0, -8, -1) * space
+        xs2 = np.arange(-2, -6, -1) * space
+        ys1 = np.zeros(8)
+        ys2 = np.zeros(4)
+        zs1 = np.zeros(8)
+        zs2 = np.zeros(4) + space
+        azimuth_rx = np.array((xs1, ys1, zs1))
+        elevation_rx = np.array((xs2, ys2, zs2))
+        rx = np.concatenate((azimuth_rx, elevation_rx), axis=-1).T
+        self.radars = []
+        for pos in rx:
+            self.radars.append(Radar(Tx_pos=Tx_pos, Rx_pos=pos, f1=f1, slope=slope, ADC_rate=ADC_rate, chirp_time=chirp_time))
+
+    def __len__(self):
+        return len(self.radars)
+
+    def __getitem__(self, i):
+        return self.radars[i]
+
+    def __iter__(self):
+        for r in self.radars:
+            yield r

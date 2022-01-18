@@ -1,9 +1,10 @@
 import numpy as np
 from .motionbase import MotionBase
+import sys
 
 class Oscillation(MotionBase):
-    def __init__(self, vector, freq):
-        super().__init__()
+    def __init__(self, vector, freq, **kwargs):
+        super().__init__(**kwargs)
         self.vector = np.array(vector)
         self.freq = freq
 
@@ -15,15 +16,18 @@ class Oscillation(MotionBase):
             self.path[i] = self.vector*A[i]
 
 class Pulse(Oscillation):
-    def __init__(self, vector, freq, pulse_length=0.1):
-        super().__init__(vector, freq)
+    def __init__(self, vector, freq, pulse_length=0.1, **kwargs):
+        super().__init__(vector, freq, **kwargs)
         self.pulse_length = pulse_length
 
     def make_path(self):
-        motion_length = int(self.pulse_length * self.fps)
-        pattern = self.make_pattern(motion_length)
-        n_pulse = int(self.t*self.freq)
-        interval = int(1/self.freq*self.fps)
+        motion_length = int(self.pulse_length * self.fps)   # how many samples a pulse would take
+        pattern = self.make_pattern(motion_length) 
+        n_pulse = int(self.t*self.freq)                     # how many pulses to make based on frequency
+        interval = int(1/self.freq*self.fps)                # how many samples (a pulse + reset) would take
+        if interval < motion_length:
+            print(f'[{self.name}] Error, frequency too high or pulse too big')
+            sys.exit(1)
         self.path = np.zeros((self.steps, 3))
         for i in range(n_pulse):
             j = i*interval

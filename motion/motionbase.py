@@ -6,7 +6,10 @@ class Stationary:
     def __init__(self, name=None):
         self.registered = False
         self.path = None
-        self.name = f'{self.__class__.__name__}_{type(self).cnt}'
+        if not name:
+            self.name = f'{self.__class__.__name__}_{type(self).cnt}'
+        else:
+            self.name = name
         type(self).cnt += 1
 
     def move(self, pos):
@@ -23,7 +26,7 @@ class Stationary:
     def register(self, t, fps):
         self.t = t
         self.fps = fps
-        self.steps = t*fps
+        self.steps = int(t*fps)
         self.registered = True
 
     def get_path(self):
@@ -33,8 +36,9 @@ class Stationary:
 
 
 class MotionBase(Stationary):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, name=None, delay=None):
+        super().__init__(name=name)
+        self.delay = delay
 
     def move(self, pos):
         if not self.registered:
@@ -56,10 +60,14 @@ class MotionBase(Stationary):
         d = np.linalg.norm(self.path[1:]-self.path[:-1], axis=1)
         if np.max(d) > max_d:
             print(f'[{self.name}] Warning: Peak velocity {np.max(d)*fps:.2f} m/s may cause ambiguous phase wrapping.')
+        if self.delay:
+            delay_steps = int(self.fps*self.delay)
+            self.path[delay_steps:] = self.path[:-delay_steps]
+            self.path[:delay_steps] = 0
 
 class MotionList(MotionBase):
-    def __init__(self, motions: list):
-        super().__init__()
+    def __init__(self, motions: list, **kwargs):
+        super().__init__(**kwargs)
         self.motions = motions
 
     def make_path(self):
@@ -73,8 +81,8 @@ class MotionList(MotionBase):
         super().register(t, fps)
 
 class Line(MotionBase):
-    def __init__(self, velocity):
-        super().__init__()
+    def __init__(self, velocity, **kwargs):
+        super().__init__(**kwargs)
         self.velocity = np.array(velocity)
 
     def make_path(self):
@@ -86,8 +94,8 @@ class LineBF(Line):
     '''
     A linear motion that turns back every 'turn' seconds
     '''
-    def __init__(self, velocity, turn):
-        super().__init__(velocity)
+    def __init__(self, velocity, turn, **kwargs):
+        super().__init__(velocity, **kwargs)
         self.turn = turn
 
     def make_path(self):

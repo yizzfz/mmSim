@@ -26,4 +26,3 @@ class Point:
 
     def register(self, *info):
         self.motion.register(*info)
-        
