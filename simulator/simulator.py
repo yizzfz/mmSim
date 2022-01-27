@@ -15,15 +15,28 @@ class Simulator:
         self.max_v = 1e-3*fps
         print(f'[{self.name}] Allowed maximum velocity is {self.max_v} m/s')
 
-    def run(self):
-        signals, freqzs = [], []
-        for radar in self.radars:
-            s, f = radar.reflect_motion_multi(self.scene)
-            signals.append(s)
-            freqzs.append(f)
-        signals = np.array(signals)
-        freqzs = np.array(freqzs)
-        return signals, freqzs
+    def run(self, freqz=False):
+        n_rx = len(self.radars)
+        if freqz:
+            signals, freqzs = [], []
+            for radar in self.radars:
+                s, f = radar.reflect_motion_multi(self.scene, freqz=freqz)
+                signals.append(s)
+                freqzs.append(f)
+            signals = np.array(signals)
+            freqzs = np.array(freqzs)
+            return signals, freqzs
+        else:
+            signals = []
+            cnt = 0
+            for radar in self.radars:
+                s = radar.reflect_motion_multi(self.scene, freqz=freqz)
+                signals.append(s)
+                cnt += 1
+                print(f'Progress {cnt/n_rx*100:.1f}%', end='\r')
+            print('')
+            signals = np.array(signals)
+            return signals
 
     def get_paths(self):
         res = []

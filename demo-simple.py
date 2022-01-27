@@ -4,7 +4,6 @@ from radar import Radar
 from scene import Point
 from motion import Oscillation, MotionList, Pulse
 from simulator import Simulator
-from util import CFAR, FFT
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -48,7 +47,7 @@ def main():
     # output dim: 
     #   signals: (n_radars, n_steps, signal_len)
     #   freqzs: (n_radars, n_steps, n_objs, (freq, phase))
-    signals, freqzs = simulator.run()
+    signals, freqzs = simulator.run(freqz=True)
     freqzs[:,:,:,1] = freqzs[:,:,:,1]/np.pi
     fft_freqzs = np.zeros((n_radars, steps, 1, 2))
     ffts = np.zeros((n_radars, steps, half))
@@ -60,9 +59,9 @@ def main():
             signal = signals[n, i]
             fft = np.fft.fft(signal, n_fft)[:half]
             ffts[n, i] = np.abs(fft)
-            peaks = CFAR(fft)
-            fft_freqzs[n, i] = np.array([(fft_freq_d[i], phase/np.pi) for i, _, phase in peaks])
-        # fft_freqzs = np.array(fft_freqzs)   # assuming FFT always report the same number of objs
+            p = np.argmax(fft)
+            fft_freqzs[n, i] = fft_freq_d[p], np.angle(fft[p]/np.pi)
+    fft_freqzs[:, :, :, 1][fft_freqzs[:, :, :, 1]<0] += 2
     print('Data processed. Preparing graph...')
 
     # visualization (showing data for radar 1 only)
@@ -71,7 +70,7 @@ def main():
     # fig 1 shows the IF signal in time domain
     ax1 = plt.subplot(321)
     t = np.arange(0, chirp_time, 1/ADC_rate)
-    line, = ax1.plot(t, signals[0, 0])
+    line, = ax1.plot(t, signals[0, 0].real)
     ax1.set_xlabel('Time (s)')
     ax1.set_ylabel('Signal Amplitude')
     ax1.set_title('IF signal in time domain')
@@ -115,7 +114,7 @@ def main():
     # set up animation
     plt.tight_layout()
     def animate(i):
-        line.set_ydata(signals[0, i])  # update the data.
+        line.set_ydata(signals[0, i].real)  # update the data.
         line2.set_ydata(ffts[0, i])
 
         line3.set_xdata(t1[:i])
