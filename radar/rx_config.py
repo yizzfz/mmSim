@@ -19,12 +19,14 @@ class RxConfig:
             self.init_square_array(na, ne)
 
     def init_square_array(self, na, ne):
+        if na <= 1 or ne <= 1:
+            raise ValueError and f'Sqaure array dimension {ne}x{na} is not 2D'
         xs = np.tile(np.arange(0, -na, -1), ne)
         zs = np.repeat(np.arange(ne), na) 
         ys = np.zeros(na*ne)
         rx = np.array((xs, ys, zs)).T
         self.azimuth_rx = np.arange(na, dtype=int)
-        self.elevation_rx = self.azimuth_rx + na
+        self.elevation_rx = [self.azimuth_rx + na, np.arange(ne) * na]
         self.rx = rx
         self.n_rx = na*ne
         self.phase_offset = 0
@@ -45,7 +47,7 @@ class RxConfig:
             rx = np.concatenate((azimuth, elevation), axis=-1).T
             
             self.azimuth_rx = np.arange(0, 8, dtype=int)
-            self.elevation_rx = np.arange(8, 12, dtype=int)
+            self.elevation_rx = [np.arange(8, 12, dtype=int)]
             self.phase_offset = 2
             self.row = 8
             self.col = 2
@@ -55,4 +57,6 @@ class RxConfig:
         self.rx = rx
         self.n_rx = rx.shape[0]
 
-        
+if __name__ == '__main__':
+    rxcfg = RxConfig('4x4')
+    import pdb; pdb.set_trace()

@@ -13,30 +13,30 @@ class Simulator:
             obj.register(self.T, self.fps)
         self.name = f'{self.__class__.__name__}'
         self.max_v = 1e-3*fps
-        print(f'[{self.name}] Allowed maximum velocity is {self.max_v} m/s')
+        # print(f'[{self.name}] Allowed maximum velocity is {self.max_v} m/s')
 
-    def run(self, freqz=False):
+    def run(self, freqz=False, ret_snr=False):
         n_rx = len(self.radars)
+        signals = []
+        snr = []
+        freqzs = []
+        cnt = 0
+        for radar in self.radars:
+            signal, info = radar.reflect_motion_multi(self.scene, freqz=freqz)
+            signals.append(signal)
+            snr.append(info.get('snr'))
+            freqzs.append(info.get('freqz'))
+            cnt += 1
+        #     print(f'Progress {cnt/n_rx*100:.1f}%', end='\r')
+        # print('')
+        signals = np.array(signals)
         if freqz:
-            signals, freqzs = [], []
-            for radar in self.radars:
-                s, f = radar.reflect_motion_multi(self.scene, freqz=freqz)
-                signals.append(s)
-                freqzs.append(f)
-            signals = np.array(signals)
             freqzs = np.array(freqzs)
             return signals, freqzs
-        else:
-            signals = []
-            cnt = 0
-            for radar in self.radars:
-                s = radar.reflect_motion_multi(self.scene, freqz=freqz)
-                signals.append(s)
-                cnt += 1
-                print(f'Progress {cnt/n_rx*100:.1f}%', end='\r')
-            print('')
-            signals = np.array(signals)
-            return signals
+
+        if ret_snr:
+            return signals, np.mean(snr)
+        return signals
 
     def get_paths(self):
         res = []

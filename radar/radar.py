@@ -123,6 +123,7 @@ class Radar:
         if freqz:
             freqzs = np.zeros((self.steps, n_total_objs, 2))
         cnt = 0
+        snr = np.zeros((self.steps))
         for obj in objs:
             obj_path = obj.get_path()
             n_obj = obj.get_size()
@@ -134,6 +135,7 @@ class Radar:
                     freqzs[i, cnt:cnt+n_obj] = res[1]
                 else:
                     signal[i] += res
+                snr[i] = 10*np.log10(self.signal_power(signal[i]))
                 if self.noise is not None:
                     # signal_power = np.mean(np.abs(signal)**2)
                     # print(signal_power)
@@ -142,11 +144,15 @@ class Radar:
                     # noise_power = 10**(self.noise/10)
                     # noise_std = np.sqrt(noise_power/2)
                     noise = self.rng.normal(0, self.noise_std, n_sample) + 1j*self.rng.normal(0, self.noise_std, n_sample)
+                    snr[i] = snr[i] - 10*np.log10(self.signal_power(noise))
                     signal[i] = signal[i] + noise
             cnt += n_obj
+        snr = np.mean(snr)
+        info = {}
         if freqz:
-            return signal, freqzs
-        return signal
+            info['freqz'] = freqzs
+        info['snr'] = snr
+        return signal, info
 
     def register(self, time, fps):
         if fps > 1/self.chirp_time:
