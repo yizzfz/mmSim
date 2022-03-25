@@ -2,7 +2,6 @@ import numpy as np
 import sys
 import datetime
 from dataset import Dataset, IFDataset
-from message import send_message
 import open3d as o3d
 np.set_printoptions(precision=2, suppress=True, linewidth=200)
 
@@ -39,10 +38,8 @@ def main():
         'velocity': velocity
     })
 
-    dataset = IFDataset('FAUST', config)
-    dataset.construct(callback=send_message, split=None)
-    # dd = dataset.load(train=False)
-    # import pdb; pdb.set_trace()
+    dataset = IFDataset('FAUST', config, location='d:/datasets/mmSim/')
+    dataset.construct(split=None)
 
     
 if __name__ == "__main__":
