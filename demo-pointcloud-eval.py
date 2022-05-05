@@ -1,19 +1,13 @@
 import numpy as np
-import scipy, scipy.io
-from scipy.ndimage import gaussian_filter1d
-from motion.oscillation import Oscillation
 from util import *
 from algo import *
-from ADC_data import DataLoader
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-from pathlib import Path
 import sys
 import datetime
-from motion import Pulse, MotionList, Line
+from motion import Line
 from radar import Radar, RadarArray, rx_config
 from simulator import Simulator
-from scene import Circle, Point
+from scene import Point
 from dataset import Dataset, DatasetMesh
 import open3d as o3d
 np.set_printoptions(precision=2, suppress=True, linewidth=200)
@@ -57,8 +51,8 @@ def main():
 
     motion = Line((0, 0.5, 0))
 
-    dataset = Dataset('FAUST', n_samples=256, distance=2, train=True).dataset
-    ref = DatasetMesh('FAUST', distance=2, train=True)
+    dataset = Dataset('FAUST', n_samples=256, distance=2, train=True, location='d:/datasets/tmp/').dataset
+    ref = DatasetMesh('FAUST', distance=2, train=True, location='d:/datasets/tmp/')
     ts = datetime.datetime.now().strftime('%H:%M')
     print(f'[{ts}] Dataset loaded.')
     
