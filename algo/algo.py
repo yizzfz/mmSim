@@ -9,6 +9,7 @@ from scipy.stats import trim_mean
 import time
 from scipy.ndimage import median_filter
 import cProfile
+from scipy.signal import find_peaks
 
 # classic CFAR
 def CFAR(data, th=-6, win1=2, win2=4, FFT=True, norm=True):
@@ -213,7 +214,7 @@ def wavelet_v1(x, wavelet_width, border=0.05, wavelet_func='morl'):
     if border > 0:
         y[:border] = 0
         y[-border:] = 0
-    return y/y.max()
+    return y
 
 # smooth tracked FFT bin a bit, deprecated
 def path_smoothing(peaks, win=None, fps=1000, return_one=False, max_dp=None):
@@ -350,11 +351,9 @@ def phase_tracking(mag:np.ndarray, sigma:int, win:int, start_idx=0, init=None):
     if init is None or np.abs(peak-init) > 10:
         init = peak
         start_idx += 1
-    else:
-        init = int(init)
 
     min_score = 1e-3/((sigma*2)**2)
-    path = np.zeros((n_steps), dtype=int)
+    path = np.zeros((n_steps), dtype=float)
     path[:start_idx] = init
 
     # start from the first chirp to find a path
@@ -365,11 +364,13 @@ def phase_tracking(mag:np.ndarray, sigma:int, win:int, start_idx=0, init=None):
     j = 0
     cur = init
     gaussian_template = gaussian(n_fft, mu=int((n_fft-1)/2), sigma=sigma)
+    # fmax = gaussian_template.max()
     gaussian_template = gaussian_template/gaussian_template.max()
-    # for each subsequent chirp 
+    # for each subsequent chirp
     for j in range(start_idx, n_steps):
         # greedily find the next bin
         f = gaussian_T(gaussian_template, mu=cur)
+        # f = gaussian(n_fft, cur, sigma)/fmax
         m = MA[j]
         s = m*f
         s[s<min_score] = 0
@@ -476,7 +477,7 @@ def moving_average(X, n, axis=1):
         ma = (ss[n:] - ss[:-n]) / n
     return ma
 
-def gaussian(n, mu=0, sigma=1):
+def gaussian(n, mu=0.0, sigma=1.0):
     """Generate a gaussian distribution"""
     x = np.arange(0, n, 1)
     y = np.exp(-(x-mu)**2/(2*sigma**2))/(sigma*np.sqrt(2*np.pi))
@@ -577,16 +578,52 @@ def get_aaed_phase(phase, bin):
     bins_involved = np.unique((bins_involved, bins_involved+1))
 
     for i in bins_involved:
+        if i >= bins:
+            continue
         tmp = phase[:, i]
         tmp = np.unwrap(tmp, period=2)
         tmp = np.concatenate(([0], np.diff(tmp)))
         tmp = median_filter(tmp, size=9)
         phase[:, i] = tmp
 
-    for i in range(1, steps):
+    for i in range(0, steps):
         bi = bin_int[i]
-        if bi == bins-1:
-            res[i] = phase[i, bi]
+        if bi >= bins-1:
+            res[i] = phase[i, bins-1]
+        else:
+            d = np.interp(bin[i]-bi, [0, 1], [phase[i, bi], phase[i, bi+1]])
+            res[i] = d
+    return res
+
+# use DACM (extended differential and cross-multiply)
+def get_aaed_phase_DACM(ffts, bin):
+    assert ffts.shape[0] == bin.shape[0]
+    # phase = phase.copy()        # avoid modifying the array
+    steps = ffts.shape[0]
+    bins = ffts.shape[1]
+    phase = np.zeros((steps, bins))
+    res = np.zeros(steps)
+    bin_int = bin.astype(int)
+
+    I0 = ffts.real
+    Q0 = ffts.imag
+    I1 = np.gradient(ffts.real, axis=0)
+    Q1 = np.gradient(ffts.imag, axis=0)
+    phase = ((I0*Q1-I1*Q0)/(I0**2+Q0**2))
+    phase[np.isnan(phase)] = 0
+
+    # peak = int(np.mean(bin))
+
+    # phase1 = phase.cumsum(axis=0)[:, peak]
+    # phase2 = np.unwrap(np.angle(ffts[:, peak]), period=np.pi*2)
+
+    # import pdb
+    # pdb.set_trace()
+
+    for i in range(0, steps):
+        bi = bin_int[i]
+        if bi >= bins-1:
+            res[i] = phase[i, bins-1]
         else:
             d = np.interp(bin[i]-bi, [0, 1], [phase[i, bi], phase[i, bi+1]])
             res[i] = d
@@ -605,12 +642,29 @@ def unwrap(signal, period=2):
 
 
 def highpass(x, order=8, cutoff=0.5):
-    b, a = signal.butter(order, cutoff, 'highpass')
-    y = signal.filtfilt(b, a, x)
+    sos = signal.butter(order, cutoff, 'highpass', output='sos')
+    y = signal.sosfiltfilt(sos, x)
     return y
-
 
 def lowpass(x, order=8, cutoff=0.5):
-    b, a = signal.butter(order, cutoff, 'lowpass')
-    y = signal.filtfilt(b, a, x)
+    sos = signal.butter(order, cutoff, 'lowpass', output='sos')
+    y = signal.sosfiltfilt(sos, x)
     return y
+
+def bandpass(x, order=8, cutoff=(0.2, 0.8)):
+    sos = signal.butter(order, cutoff, 'bandpass', output='sos')
+    y = signal.sosfiltfilt(sos, x)
+    return y
+
+def find_peaks_valleys(x):
+    peaks = find_peaks(x)[0]
+    valleys = find_peaks(-x)[0]
+    res = np.zeros((len(peaks), 3), dtype=int)
+    res[:, 0] = peaks
+    if peaks[0] < valleys[0]:
+        valleys = np.concatenate(([0], valleys))
+    if peaks[-1] > valleys[-1]:
+        valleys = np.concatenate((valleys, [len(peaks)-1]))
+    res[:, 1] = valleys[0:len(peaks)]
+    res[:, 2] = valleys[1:len(peaks)+1]
+    return res

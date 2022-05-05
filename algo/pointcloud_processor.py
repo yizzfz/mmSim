@@ -7,7 +7,7 @@ from enum import Enum
 import scipy
 import scipy.signal
 from skimage.feature import peak_local_max
-from scipy.ndimage import maximum_filter
+from scipy.ndimage import maximum_filter, gaussian_filter
 from radar import RxConfig
 from util import log, config_to_id
 import multiprocessing
@@ -65,8 +65,10 @@ class PointCloudProcessorBase:
             'phi': self.steering_vector_1d(n_azimuth, self.n_aoa_fft, format='phi'),
             'theta': self.steering_vector_1d(n_azimuth, self.n_aoa_fft, format='theta')
         }
-        self.twod_sv = self.steering_vector_2d(self.rx_config.rx, self.n_aoa_fft, format='phi')
-        assert np.allclose(self.azimuth_sv['phi'], self.twod_sv[:n_azimuth, self.n_aoa_fft_cut])
+        self.twod_sv_grid = self.steering_vector_2d_grid(self.rx_config.rx, [8, 32, 128, 512], format='phi')
+        self.twod_sv = self.twod_sv_grid[-1]
+        # self.twod_sv = self.steering_vector_2d(self.rx_config.rx, self.n_aoa_fft, format='phi')
+        # assert np.allclose(self.azimuth_sv['phi'], self.twod_sv[:n_azimuth, self.n_aoa_fft_cut])
 
     def range_fft(self, X):
         """Return a range-FFT matrix [n_rx, n_chirps, n_range_fft]
@@ -287,18 +289,20 @@ class PointCloudProcessorBase:
                          np.conj(steering_vec.T), nullspace, steering_vec))
         return res
 
-    def bf_2d(self, cov, steering_vec, method, n_sample=1):
+    def bf_2d(self, cov, steering_vec, method, n_sample=1, cov_inv=None, nullspace=None):
         """Optimized for speed"""
-        cov_inv = self.mat_inv(cov)
         if cov_inv is None:
-            return
+            cov_inv = self.mat_inv(cov)
+            if cov_inv is None:
+                return
 
         sv = steering_vec
         svc = np.conj(steering_vec)
         if method == AoA.music:
-            nullspace = self.nullspace(cov, n_sample)
             if nullspace is None:
-                return
+                nullspace = self.nullspace(cov, n_sample)
+                if nullspace is None:
+                    return
         if method == AoA.conventional:
             res = np.abs(np.einsum('xae,xy,yae->ae', svc, cov, sv))
         elif method == AoA.mvdr:
@@ -306,6 +310,49 @@ class PointCloudProcessorBase:
         elif method == AoA.music:
             res = np.abs(1/np.einsum('xae,xy,yae->ae', svc, nullspace, sv))
         return res
+
+    def bf_2d_grid(self, cov, method, n_sample=1):
+        """2D BF using sparser grids then denser grids"""
+        sv_grid = self.twod_sv_grid
+        
+        eigenvalues, _ = np.linalg.eigh(cov)         # auto sorted in ascending order
+        eigenvalues = np.flip(eigenvalues)                      # reverse to descending order
+        n_obj = self.estimate_n_source(eigenvalues, 1)
+        if n_obj == 0:
+            return
+        cov_inv = self.mat_inv(cov)
+        if cov_inv is None:
+            return
+        nullspace = self.nullspace(cov, n_sample)
+
+        peaks = []
+        for i, sv in enumerate(sv_grid):
+            if i == 0:
+                bf = self.bf_2d(cov, sv, method, 1, cov_inv, nullspace)
+                last_gsize = sv.shape[1]
+            else:
+                bf = np.zeros(sv.shape[1:])
+                cur_gsize = sv.shape[1]
+                ratio = cur_gsize/last_gsize
+                rng = int(cur_gsize/last_gsize)+1
+                for y, x in peaks:
+                    y = int((y+0.5)*ratio)
+                    x = int((x+0.5)*ratio)
+                    top = max(0, y-rng)
+                    bot = min(cur_gsize, y+rng)
+                    left = max(0, x-rng)
+                    right = min(cur_gsize, x+rng)
+                    bf_new = self.bf_2d(cov, sv[:, top:bot, left:right], method, 1, cov_inv, nullspace)
+                    bf[top:bot, left:right] = np.maximum(bf[top:bot, left:right], bf_new)
+                last_gsize = cur_gsize
+            if i == len(sv_grid) - 1:
+                # print(peak_local_max(bf, threshold_rel=0.25, num_peaks=n_obj))
+                # import pdb; pdb.set_trace()
+                break
+            peaks = peak_local_max(bf, threshold_rel=0.25, num_peaks=n_obj)
+            if len(peaks) == 0:
+                return
+        return bf
 
     def bf_per_range_azimuth(self, X, method=AoA.conventional, format='phi', norm=True, return_list=False):
         """Performs azimuth beamforming on each range bin, return a range-Azimuth heatmap.
@@ -327,6 +374,8 @@ class PointCloudProcessorBase:
             res[d] = self.bf(cov[d], sv, method, azimuth.shape[1])
             if norm:
                 res[d] = res[d] * d**4      # to compensate power loss due to further distances
+                if method == AoA.music:
+                    res[d] = np.log10(res[d]+1)     # music power spectrum has some extremely high values that has to be cut down to log scale
             if return_list:
                 eigenvalues, _ = np.linalg.eigh(cov[d])         # auto sorted in ascending order
                 eigenvalues = np.flip(eigenvalues)                      # reverse to descending order
@@ -341,23 +390,24 @@ class PointCloudProcessorBase:
         return res
 
     def bf_per_range_2d(self, X, method=AoA.conventional):
-        """Performs 2d beamforming on each range bin, return a range-Azimuth heatmap.
+        """Performs 2d beamforming on each range bin, return a point cloud.
 
         Parameters:
             X:[n_rx, n_chirp, n_range_fft] 3D array.
             method: conventional, mvdr, or music.
 
         Returns:
-            [n_range_fft, n_angles] 2D array, the range-Azimuth heatmap.
+            [n, 3] detected point cloud.
         """
-        sv = self.twod_sv
+        # sv = self.twod_sv
         res = []
         tmp = []
         for i in range(X.shape[2]):
             # print(f'Progress {i/X.shape[2]*100:.1f}%', end='\r')
             all_rx = X[:, :, i]           # (12, 50)
             cov = self.covariance_matrix(all_rx)
-            bf = self.bf_2d(cov, sv, method)
+            # bf = self.bf_2d(cov, sv, method)
+            bf = self.bf_2d_grid(cov, method, n_sample=all_rx.shape[1])
             if bf is None:
                 continue
 
@@ -438,7 +488,7 @@ class PointCloudProcessorBase:
         return res[:, :3]
 
     def bf_per_point_2d(self, X, detection_list, method=AoA.conventional, return_velocity=False):
-        """Performs beamforming given a dection list, return their x-y-z coordinates.
+        """Performs 2D beamforming given a dection list, return their x-y-z coordinates.
         Format has to be phi.
 
         Parameters:
@@ -448,24 +498,22 @@ class PointCloudProcessorBase:
             return_velocity: boolean, return (x,y,z,v) if True, (x,y,z) otherwise.
 
         Returns:
-            [n, 3] or [n, 4] array that has the object's x-y-z coordinates (and velocity).
+            [n, 3] or [n, 4] array that has the object's x-y-z coordinates (and optionally velocity).
         """
         n_objs = detection_list.shape[0]
-        sv = self.twod_sv
         res = []
-        tmp = []
         for i in range(n_objs):
             # print(f'Progress {i/n_objs*100:.1f}%', end='\r')
             all_rx = X[:, detection_list[i, 0], detection_list[i, 1]]           # (12)
             cov = self.covariance_matrix(all_rx)
-            bf = self.bf_2d(cov, sv, method)
+            bf = self.bf_2d_grid(cov, method)
+            # bf = self.bf_2d(cov, self.twod_sv, method)
             if bf is None:
                 continue
 
             eigenvalues, _ = np.linalg.eigh(cov)         # auto sorted in ascending order
             eigenvalues = np.flip(eigenvalues)                      # reverse to descending order
             n_obj = self.estimate_n_source(eigenvalues, X.shape[1])
-            tmp.append(n_obj)
 
             peaks = peak_local_max(bf, threshold_rel=0.25, num_peaks=n_obj)
             for wz, wx in peaks:
@@ -476,7 +524,6 @@ class PointCloudProcessorBase:
         res = np.asarray(res).reshape((-1, 4))
         res = res[~np.isnan(res).any(axis=1)]       # remove points with nan coordinates
         # print(f'Beamforming finished with {res.shape[0]} points.')
-        # print(tmp)
         if return_velocity:
             return res
         return res[:, :3]
@@ -497,7 +544,7 @@ class PointCloudProcessorBase:
         n_objs = detection_list.shape[0]
         sv = self.twod_sv
         res = []
-        tmp = []
+        # tmp = []
         for i in range(n_objs):
             all_rx = X[:, :, detection_list[i, 0]]           # (12, 50)
             wx = detection_list[i, 1]
@@ -511,7 +558,7 @@ class PointCloudProcessorBase:
             eigenvalues, _ = np.linalg.eigh(cov)         # auto sorted in ascending order
             eigenvalues = np.flip(eigenvalues)                      # reverse to descending order
             n_obj = self.estimate_n_source(eigenvalues, X.shape[1])
-            tmp.append(n_obj)
+            # tmp.append(n_obj)
             if n_obj == 0:
                 continue
 
@@ -575,7 +622,7 @@ class PointCloudProcessorBase:
         n_rx, n_chirp, _ = X.shape
         cov = np.zeros((self.n_range_fft_cut, n_rx, n_rx), dtype=complex)
         for d in range(self.n_range_fft_cut):
-            cov[d] = self.covariance_matrix(X[:, :, d])
+            cov[d] = self.covariance_matrix(X[:, :, d], dl=dl)
         return cov
 
     def covariance_matrix_per_frame(self, X, dl=True):
@@ -592,7 +639,7 @@ class PointCloudProcessorBase:
         cov = np.zeros((n_rx, n_rx), dtype=complex)
         for i in range(n_chirp):
             x = X[:, i, :]
-            cov = cov + self.covariance_matrix(x)       # np.matmul(x, np.conj(x.T))/(n_samples-1)
+            cov = cov + self.covariance_matrix(x, dl=dl)       # np.matmul(x, np.conj(x.T))/(n_samples-1)
         cov = cov / n_chirp
         self.mat_inv(cov)
         if dl:
@@ -763,6 +810,26 @@ class PointCloudProcessorBase:
         # assert np.allclose(res[:, ii, jj], self.steering_vector_1d_elevation(rx, angles[jj], n_aoa_fft)[:, ii])
         res = azimuth_vec * elevation_vec 
         return res
+
+    def steering_vector_2d_grid(self, rx, n_angles: list[int], theta_range=[-np.pi/2, np.pi/2], format='phi'):
+        """Generate a 2D steering vector grid for a 2D ULA.
+
+        Parameters:
+            n_rx: number of rx.
+            n_angles: number of angles of each gird, resolution = theta_range/n_angle
+            theta_range: default -90 to 90
+            format: 'theta' or 'phi'. phi(a) = cos(e)sin(a), phi(e) = sin(e)
+
+        Returns:
+            [n_level, n_rx, n_elevation, n_azimuth] matrix.
+            res[:, i, j] = self.steering_vector_1d_elevation(.., angle[j], .., 'phi')[:, i]
+        """
+        res = []
+        for n_angle in n_angles:
+            sv = self.steering_vector_2d(rx, n_angle, theta_range=theta_range, format=format)
+            res.append(sv)
+        return res
+
 
     def xyz_estimate(self, d, wx, wz):
         x = d*wx
@@ -967,8 +1034,7 @@ class PointCloudProcessor(PointCloudProcessorBase):
                 range_azimuth = self.bf_per_range_azimuth(X, method, norm=True)
                 range_azimuth = range_azimuth/range_azimuth.max()*128
                 peaks = peak_2d_func(range_azimuth, **peak_2d_args)
-                if peaks.shape[0] > 1000:
-                    return np.empty((0, 3))
+
                 if debug:
                     print(f'Detected {peaks.shape[0]} points from range-azimuth heatmap')
                     range_azimuth_peaks = np.zeros(range_azimuth.shape)
@@ -978,6 +1044,10 @@ class PointCloudProcessor(PointCloudProcessorBase):
                     axs[0].pcolormesh(range_azimuth)
                     axs[1].pcolormesh(range_azimuth_peaks)
                     plt.show()
+                if peaks.shape[0] > 2048:
+                    # print(f'Too many points {peaks.shape[0]} from peak_2d, capping at 2048')
+                    peaks = peaks[np.random.choice(peaks.shape[0], 2048, replace=False)]
+                    assert peaks.shape[0] == 2048
                 point_cloud = self.bf_per_point_elevation(X, peaks, method=method)
             else:
                 raise ValueError(f"npass value {npass} incorrect")

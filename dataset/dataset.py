@@ -1,4 +1,3 @@
-import torch
 import torch_geometric
 from torch_geometric.transforms import BaseTransform, Compose, SamplePoints, FixedPoints
 from enum import Enum
@@ -9,7 +8,8 @@ import numpy as np
 computer_loc = {
     'K-X360': 'e:/study/datasets/mmSim/',
     'K-Shuangzi': 'f:/datasets/mmSim/',
-    'IT077979': 'd:/datasets/mmSim/'
+    'IT077979': 'd:/datasets/mmSim/',
+    'IT090254': 'c:/datasets/mmSim/',
 }
 
 class RadarTransform(BaseTransform):
