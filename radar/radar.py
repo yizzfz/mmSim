@@ -20,9 +20,6 @@ class Radar:
 
         wavelength = self.c / self.f1
         self.K = 10 ** 2.6 * 1e-3 * wavelength**2 * 1e-2**2 * chirp_time / (4*np.pi)**3 / 4e-21
-        self.A = lambda d: np.sqrt(self.K/d**4)
-        self.snr_db = lambda d: 10*np.log(self.K/d**4)
-        self.snr = lambda d: self.K/d**4
         self.noise = noise
         if noise is not None:
             self.noise_std = (10**(noise/10)/2)**0.5    # convert dB to linear, calculate std for normal distribution
@@ -36,6 +33,15 @@ class Radar:
         self.name = f'{self.__class__.__name__}_{type(self).cnt}'
         type(self).cnt += 1
         # print(f'[{self.name}] configured to {f1/1e9:.1f} GHz to {(f1+slope*chirp_time)/1e9:.1f} GHz')
+
+    def A(self, d):
+        return np.sqrt(self.K/d**4)
+    
+    def snr_db(self, d):
+        return 10*np.log(self.K/d**4)
+
+    def snr(self, d):
+        return self.K/d**4
 
     def distance_between(self, pos1, pos2):
         dis = np.linalg.norm(np.array(pos1)-np.array(pos2))

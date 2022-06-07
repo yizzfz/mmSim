@@ -6,6 +6,7 @@ import open3d as o3d
 import hashlib
 import json
 import cv2
+import pandas as pd
 
 # find the highest value in an FFT, return (idx, mag, phase)
 def get_FFT_peak(data):
@@ -20,7 +21,7 @@ def log(message):
     ts = datetime.datetime.now().strftime('%H:%M')
     print(f'[{ts}] {message}')
 
-def prepare_display(data, data_gt=None, mesh=None, origin=[0, 0, 0], show_radar=False):
+def prepare_display(data, data_gt=None, mesh=None, origin=[0, 0, 0], show_radar=False, voxel=False):
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(data)
     pcd.colors = o3d.utility.Vector3dVector(np.tile(np.array([1, 0, 0]), (data.shape[0], 1)))
@@ -40,27 +41,35 @@ def prepare_display(data, data_gt=None, mesh=None, origin=[0, 0, 0], show_radar=
         o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh.pos)
         o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh.face.T)
         display.append(o3d_mesh)
+
+    if voxel:
+        pcd_voxel = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd, voxel_size=0.01)
+        display.append(pcd_voxel)
     return display
 
-def plot_point_cloud_o3d(data, data_gt=None, mesh=None, origin=[0, 0, 0], show_radar=False, video=False):
+def plot_point_cloud_o3d(data, data_gt=None, mesh=None, voxel=False, origin=[0, 0, 0], show_radar=False, video=False, view='front'):
     """The x, y, z axis will be rendered as red, green, and blue arrows respectively
     """
-    display = prepare_display(data, data_gt, mesh, origin, show_radar)
+    display = prepare_display(data, data_gt, mesh, origin, show_radar, voxel=voxel)
     vis = o3d.visualization.Visualizer()
-    vis.create_window()
+    vis.create_window(height=1080, width=1920)
     for d in display:
         vis.add_geometry(d)
-    param = o3d.io.read_pinhole_camera_parameters('o3d-camera.json')
+    if view == 'left':
+        cfg = 'o3d-camera-left.json'
+    else:
+        cfg = 'o3d-camera.json'
+    param = o3d.io.read_pinhole_camera_parameters(cfg)
     ctr = vis.get_view_control()
-    ctr.convert_from_pinhole_camera_parameters(param)
+    ctr.convert_from_pinhole_camera_parameters(param, allow_arbitrary=True)
     
     if video:
         o3d_video(vis, video)
     else:
         vis.run()
-        ts = datetime.datetime.now().strftime('%m%d%H%M%S')
-        image = vis.capture_screen_float_buffer(False)
-        plt.imsave(f"{ts}.png", np.asarray(image), dpi=1)
+        # ts = datetime.datetime.now().strftime('%m%d%H%M%S')
+        # image = vis.capture_screen_float_buffer(False)
+        # plt.imsave(f"{ts}.png", np.asarray(image), dpi=1)
         vis.destroy_window()
 
 def o3d_video(vis, video):
@@ -88,3 +97,44 @@ def config_to_id(config, name=None):
     if name is not None:
         return name + '-' + hashlib.sha1(json.dumps(config, sort_keys=True).encode()).hexdigest()
     return hashlib.sha1(json.dumps(config, sort_keys=True).encode()).hexdigest()
+
+def read_csv(datafile):
+    header = ['Name', 'VIoU', 'NIoU', 'Precision', 'Sensitivity']
+    try:
+        data = pd.read_csv(datafile, header=None, names=header)
+    except FileNotFoundError as e:
+        print(f'Search result {datafile} not found, using default')
+        return 'CA-6-80-64'
+    data['FMI'] = np.sqrt(data['Sensitivity']*data['Precision'])
+    data = data.sort_values('FMI', ascending=False)
+    first = data.iloc[0]
+    return first[0]
+
+def save_one_fig(figname, pcd, mesh=None, view='front'):
+    pcd_o3d = o3d.geometry.PointCloud()
+    pcd_o3d.points = o3d.utility.Vector3dVector(pcd)
+    pcd_o3d.colors = o3d.utility.Vector3dVector(np.tile(np.array([0, 0, 1]), (pcd.shape[0], 1)))
+    if view == 'left':
+        cfg = 'o3d-camera-left.json'
+    else:
+        cfg = 'o3d-camera.json'
+    param = o3d.io.read_pinhole_camera_parameters(cfg)
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(width=480, height=640)
+    vis.add_geometry(pcd_o3d)
+    if mesh is not None:
+        vertice = mesh.pos.numpy()
+        face = mesh.face.T.numpy()
+        mesh_o3d = o3d.geometry.TriangleMesh()
+        mesh_o3d.vertices = o3d.utility.Vector3dVector(vertice)
+        mesh_o3d.triangles = o3d.utility.Vector3iVector(face)
+        vis.add_geometry(mesh_o3d)
+    ctr = vis.get_view_control()
+    ctr.convert_from_pinhole_camera_parameters(param, allow_arbitrary=True)
+    vis.update_geometry(pcd_o3d)
+    if mesh is not None:
+        vis.update_geometry(mesh_o3d)
+    vis.poll_events()
+    vis.update_renderer()
+    vis.capture_screen_image(f'{figname}-{view}.png')
+    vis.destroy_window()

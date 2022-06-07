@@ -1,5 +1,5 @@
 import numpy as np
-import sys
+import warnings
 
 class Stationary:
     cnt = 0
@@ -17,8 +17,7 @@ class Stationary:
         Take (n, 3) pos, return (steps, n, 3) pos
         '''
         if not self.registered:
-            print('Err: Motion initialised but not registered with the simulator')
-            sys.exit(1)
+            raise RuntimeError('Err: Motion initialised but not registered with the simulator')
         pos = np.expand_dims(pos, 0)
         res = np.repeat(pos, self.steps, 0)
         return res
@@ -31,7 +30,7 @@ class Stationary:
 
     def get_path(self):
         if not self.registered:
-            print('Err: Motion not registered with the simulator, path not available')
+            raise RuntimeError('Err: Motion not registered with the simulator, path not available')
         return self.path
 
 
@@ -42,8 +41,7 @@ class MotionBase(Stationary):
 
     def move(self, pos):
         if not self.registered:
-            print('Err: Motion initialised but not registered with the simulator')
-            sys.exit(1)
+            raise RuntimeError('Err: Motion initialised but not registered with the simulator')
         n = pos.shape[0]
         res = np.zeros((self.steps, n, 3))
         for i in range(self.steps):
@@ -59,7 +57,7 @@ class MotionBase(Stationary):
         max_d = 1e-3
         d = np.linalg.norm(self.path[1:]-self.path[:-1], axis=1)
         if np.max(d) > max_d:
-            print(f'[{self.name}] Warning: Peak velocity {np.max(d)*fps:.2f} m/s may cause ambiguous phase wrapping.')
+            warnings.warn(f'[{self.name}] Warning: Peak velocity {np.max(d)*fps:.2f} m/s may cause ambiguous phase wrapping.')
         if self.delay:
             delay_steps = int(self.fps*self.delay)
             self.path[delay_steps:] = self.path[:-delay_steps]

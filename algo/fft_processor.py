@@ -18,6 +18,7 @@ class FFTProcessor:
         self.max_freq_i = np.argmax(fft_freq_d>self.max_d)
         self.fft_freq = fft_freq[:self.max_freq_i]
         self.win = np.hanning(n_samples)
+        import pdb; pdb.set_trace()
 
     def compute_FFTs(self, data, split=True):
         data = data * self.win
@@ -30,3 +31,12 @@ class FFTProcessor:
 
     def get_fft_freq(self):
         return self.fft_freq
+
+if __name__ == '__main__':
+    config = {
+        'fps': 5000,
+        'samples_per_chirp': 1500,
+        'ADC_rate': 9e6,
+        'slope': 21e12,
+    }
+    FP = FFTProcessor(config)

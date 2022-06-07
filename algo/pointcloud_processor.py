@@ -1,31 +1,35 @@
 import numpy as np
+import pandas as pd
 import datetime
 import matplotlib.pyplot as plt
 from algo import CFAR_A
-from .evaluation import Evaluator
+from .evaluation import Evaluator, N_METRICS
 from enum import Enum
 import scipy
 import scipy.signal
 from skimage.feature import peak_local_max
 from scipy.ndimage import maximum_filter, gaussian_filter
 from radar import RxConfig
-from util import log, config_to_id
+from util import log, config_to_id, read_csv, save_one_fig
 import multiprocessing
-from dataset import IFDataset
+from dataset import IFDataset, DatasetMesh
 import warnings
+import os
 
 AoA = Enum('AoA', 'conventional mvdr music fft')
+
+
 class PointCloudProcessorBase:
     # data: (n_rx, chirps_per_frame, samples_per_chirp)
     def __init__(self, config, max_d=None, max_v=None, n_aoa_fft=64, range_fft_m=1, doppler_fft_m=1, aoa_fft_flag=None):
-        self.config = config
+        self.config = config.copy()
         self.id = config_to_id(config)
         n_samples = self.config['samples_per_chirp']
         chirps_per_frame = self.config['chirps_per_frame']
         self.rx_config = self.config.get('rx_config')
         if self.rx_config is None:
             self.rx_config = RxConfig(self.config['layout'])
-        
+
         self.n_range_fft = n_samples * range_fft_m
         self.n_range_fft_cut = int(self.n_range_fft/2)
         self.n_doppler_fft = chirps_per_frame * doppler_fft_m
@@ -36,20 +40,20 @@ class PointCloudProcessorBase:
         self.aoa_fft_flag = aoa_fft_flag
         if self.aoa_fft_flag is None:
             if len(self.rx_config.elevation_rx) > 1 and self.rx_config.elevation_rx[1].shape[0] > 2:
-                self.aoa_fft_flag = 1
+                self.aoa_fft_flag = 1       # can use a 2D FFT or two 1D FFTs
             else:
-                self.aoa_fft_flag = 0
+                self.aoa_fft_flag = 0       # use the old style FFT for 1443 type anntenna
 
         if max_d:
             ADC_rate = self.config['ADC_rate']
             fft_freq = np.fft.fftfreq(self.n_range_fft, d=1.0/ADC_rate)
             self.fft_freq_d = self.range_freq_to_dis(fft_freq)
-            self.n_range_fft_cut = np.argmax(self.fft_freq_d>max_d)
+            self.n_range_fft_cut = np.argmax(self.fft_freq_d > max_d)
 
         if max_v:
             fft_freq = np.fft.fftfreq(self.n_doppler_fft, d=1)
             self.fft_freq_v = self.doppler_freq_to_vel(fft_freq)
-            self.n_doppler_fft_cut = np.argmax(self.fft_freq_v>max_v)
+            self.n_doppler_fft_cut = np.argmax(self.fft_freq_v > max_v)
             self.n_doppler_fft_boundary = int((self.n_doppler_fft-self.n_doppler_fft_cut*2)/2)
         self.dis = self.range_freq_to_dis(np.arange(self.n_range_fft_cut)*(ADC_rate/self.n_range_fft))
         self.vel = self.doppler_freq_to_vel(np.arange(-self.n_doppler_fft_cut, self.n_doppler_fft_cut)*(1/self.n_doppler_fft))
@@ -65,7 +69,11 @@ class PointCloudProcessorBase:
             'phi': self.steering_vector_1d(n_azimuth, self.n_aoa_fft, format='phi'),
             'theta': self.steering_vector_1d(n_azimuth, self.n_aoa_fft, format='theta')
         }
-        self.twod_sv_grid = self.steering_vector_2d_grid(self.rx_config.rx, [8, 32, 128, 512], format='phi')
+        gs = [8]
+        while gs[-1] < n_aoa_fft/4:
+            gs.append(gs[-1]*4)
+        gs.append(n_aoa_fft)
+        self.twod_sv_grid = self.steering_vector_2d_grid(self.rx_config.rx, gs, format='phi')
         self.twod_sv = self.twod_sv_grid[-1]
         # self.twod_sv = self.steering_vector_2d(self.rx_config.rx, self.n_aoa_fft, format='phi')
         # assert np.allclose(self.azimuth_sv['phi'], self.twod_sv[:n_azimuth, self.n_aoa_fft_cut])
@@ -121,7 +129,7 @@ class PointCloudProcessorBase:
             cfar1 = self.cfar(X[:, k], th=th, win=win, guard=guard, mode=mode, min_db=min_db, min_rel=min_rel)   # cfar in doppler domain for each range bin
             bitmask[cfar1] = 1
 
-        detection_list = np.where(bitmask==1)[0]
+        detection_list = np.where(bitmask == 1)[0]
         for k in detection_list:
             cfar2 = self.cfar(X[k], th=th, win=win, guard=guard, mode=mode, min_db=min_db, min_rel=min_rel)  # cfar in range domain for each doppler bin
             for i in cfar2:
@@ -136,27 +144,39 @@ class PointCloudProcessorBase:
             plt.show()
         return np.array(res)
 
-    def find_peaks(self, X, th=0.25, n_peak=None):
-        # th = max(np.max(X)*th, np.min(X)*2)
+    def find_peaks(self, X, th=0.25, n_peaks=None):
         th = np.max(X)*th
         peaks, vals = scipy.signal.find_peaks(X, height=th)
         peaks = peaks[np.argsort(vals['peak_heights'])[::-1]]   # sort to height descending
-        if n_peak:
-            peaks = peaks[:n_peak]
+        if n_peaks:
+            peaks = peaks[:n_peaks]
+        # # peaks = np.unique((peaks, peaks-1, peaks-2, peaks+1, peaks+2))
+        # peaks = self.cfar(X, mode='CA', th=16, win=80, guard=64)
         return peaks
 
-    # def find_peaks_2d(self, X, th=0.25):
-    #     X = maximum_filter(X, 1)
-    #     peaks = peak_local_max(X, threshold_rel=th)
-    #     return peaks
+    def find_peaks_2d(self, X, th=0.25, n_peaks=np.inf):
+        peaks = peak_local_max(X, threshold_rel=th, num_peaks=n_peaks)
+        return peaks
+
+    def diffuse_2d(self, peaks, limx, limy):
+        res = []
+        for y, x in peaks:
+            for ox in range(-2, 3):
+                for oy in range(-2, 3):
+                    y1 = y+oy
+                    x1 = x+ox
+                    if 0 <= x1 < limx and 0 <= y1 < limy:
+                        res.append((y1, x1))
+        res = np.unique(np.asarray(res), axis=0)
+        return res
 
     def threshold(self, X, th=0.5, db=None, debug=False):
         if db:
             th = X.max() - db
         else:
             th = X.max() * th
-        rows, cols = np.where(X>th)
-        res =  np.stack((rows, cols), axis=1)
+        rows, cols = np.where(X > th)
+        res = np.stack((rows, cols), axis=1)
         if debug:
             Y = np.zeros(X.shape)
             for i, j in res:
@@ -167,7 +187,54 @@ class PointCloudProcessorBase:
             plt.show()
         return res
 
-    def aoa_fft_per_point(self, X, detection_list, return_velocity=False):
+    def aoa_fft_1d(self, all_rx, detection):
+        """Uses an azimuth FFT first, then an elevation FFT or another azimuth FFT on the second pair of antennas"""
+        res = []
+        azimuth = all_rx[self.rx_config.azimuth_rx]
+        elevation = all_rx[self.rx_config.elevation_rx[self.aoa_fft_flag]]
+        azimuth_fft = np.fft.fft(azimuth, self.n_aoa_fft)
+        azimuth_fft = np.fft.fftshift(azimuth_fft)
+        azimuth_fft_mag = np.abs(azimuth_fft)
+        # p1 = np.argmax(azimuth_fft_mag)
+        p1s = self.find_peaks(azimuth_fft_mag, th=0.5)
+        v = self.vel[detection[0]]
+        d = self.dis[detection[1]]
+
+        elevation_fft = np.fft.fft(elevation, self.n_aoa_fft)
+        elevation_fft = np.fft.fftshift(elevation_fft)
+        phase_offset = self.rx_config.phase_offset
+        for p1 in p1s:
+            wx = self.fft_freq_a[p1]
+            if self.aoa_fft_flag == 0:          # use phase for elevation
+                wz = np.angle(azimuth_fft[p1]*(elevation_fft[p1].conj())*np.exp(1j*phase_offset*wx*np.pi))/np.pi
+                x, y, z = self.xyz_estimate(d, wx, wz)
+                res.append((x, y, z, v))
+            else:                               # use another fft
+                elevation_fft_mag = np.flip(np.abs(elevation_fft))      # flip so that object from top has a positive phase
+                p2s = self.find_peaks(elevation_fft_mag, th=0.5)
+                for p2 in p2s:
+                    wz = self.fft_freq_a[p2]
+                    x, y, z = self.xyz_estimate(d, wx, wz)
+                    res.append((x, y, z, v))
+        return res
+
+    def aoa_fft_2d(self, all_rx, detection):
+        """Uses an 2D FFT"""
+        res = []
+        v = self.vel[detection[0]]
+        d = self.dis[detection[1]]
+
+        all_rx_2d = self.rx_config.prepare_2d_fft_data(all_rx)
+        afft = np.fft.fft2(all_rx_2d, s=(self.n_aoa_fft, self.n_aoa_fft))
+        afft = np.fft.fftshift(afft)
+        afft = np.abs(afft)
+        peaks = self.find_peaks_2d(afft, th=0.75, n_peaks=2)
+        for wz, wx in peaks:
+            x, y, z = self.xyz_estimate(d, self.fft_freq_a[wx], self.fft_freq_a[wz])
+            res.append((x, y, z, v))
+        return res
+
+    def aoa_fft_per_point(self, X, detection_list, return_velocity=False, npass=None):
         """Performs AoA FFT given FFT data matrix and CFAR dection list, return a point cloud
 
         Parameters:
@@ -179,35 +246,21 @@ class PointCloudProcessorBase:
         """
         n_objs = detection_list.shape[0]
         res = []
+        if npass is None:
+            npass = 1 if self.aoa_fft_flag == 1 else 2
+        if npass == 1 and self.aoa_fft_flag == 0:
+            warnings.warn("Warning: calling 2D FFT but receiver row <= 2, forcing to be 1D FFT")
+            npass = 2
+
+        if npass == 1:
+            func = self.aoa_fft_2d      # 2d FFT
+        else:
+            func = self.aoa_fft_1d      # old style FFT
+
         for i in range(n_objs):
             all_rx = X[:, detection_list[i, 0], detection_list[i, 1]]
-            azimuth = all_rx[self.rx_config.azimuth_rx]
-            elevation = all_rx[self.rx_config.elevation_rx[self.aoa_fft_flag]]
+            res += func(all_rx, detection_list[i])
 
-            azimuth_fft = np.fft.fft(azimuth, self.n_aoa_fft)
-            azimuth_fft = np.fft.fftshift(azimuth_fft)
-            azimuth_fft_mag = np.abs(azimuth_fft)
-            # p1 = np.argmax(azimuth_fft_mag)
-            p1s = self.find_peaks(azimuth_fft_mag, th=0.5)
-            v = self.vel[detection_list[i, 0]]
-            d = self.dis[detection_list[i, 1]]
-
-            elevation_fft = np.fft.fft(elevation, self.n_aoa_fft)
-            elevation_fft = np.fft.fftshift(elevation_fft)
-            for p1 in p1s:
-                wx = self.fft_freq_a[p1]
-                if self.aoa_fft_flag == 0:          # use phase for elevation
-                    phase_offset = self.rx_config.phase_offset
-                    wz = np.angle(azimuth_fft[p1]*(elevation_fft[p1].conj())*np.exp(1j*phase_offset*wx*np.pi))/np.pi
-                    x, y, z = self.xyz_estimate(d, wx, wz)
-                    res.append((x, y, z, v))
-                else:                               # use 2d fft
-                    elevation_fft_mag = np.flip(np.abs(elevation_fft))      # flip so that object from top has a positive phase
-                    p2s = self.find_peaks(elevation_fft_mag, th=0.5)
-                    for p2 in p2s:
-                        wz = self.fft_freq_a[p2]
-                        x, y, z = self.xyz_estimate(d, wx, wz)
-                        res.append((x, y, z, v))
         res = np.asarray(res).reshape((-1, 4))
         res = res[~np.isnan(res).any(axis=1)]
         if return_velocity:
@@ -226,7 +279,7 @@ class PointCloudProcessorBase:
             [n_angles] 1D array or [n_range, n_angles] if per_range is True.
         """
         azimuth = X[self.rx_config.azimuth_rx, :, :self.n_range_fft_cut]
-        azimuth = np.transpose(azimuth, (2, 1, 0)) 
+        azimuth = np.transpose(azimuth, (2, 1, 0))
         azimuth_fft = np.fft.fft(azimuth, self.n_aoa_fft)
         azimuth_fft = np.fft.fftshift(azimuth_fft, axes=2)
         azimuth_fft_mag = np.abs(azimuth_fft)
@@ -244,14 +297,14 @@ class PointCloudProcessorBase:
             cov_inv = self.mat_inv(cov)
             if cov_inv is None:
                 return res
-        
+
         if method == AoA.music and nullspace is None:
             nullspace = self.nullspace(cov, n_sample)
             if nullspace is None:
                 return res
 
         # for speed optimization later we can use
-        # 1/np.abs(np.array(sv.H*cov_inv).T* np.array(sv)).sum(axis=0) 
+        # 1/np.abs(np.array(sv.H*cov_inv).T* np.array(sv)).sum(axis=0)
         for a in range(self.n_aoa_fft):
             s = steering_vec[:, a]
             if method == AoA.conventional:
@@ -271,7 +324,7 @@ class PointCloudProcessorBase:
             cov_inv = self.mat_inv(cov)
             if cov_inv is None:
                 return res
-        
+
         if method == AoA.music and nullspace is None:
             nullspace = self.nullspace(cov, n_sample)
             if nullspace is None:
@@ -314,10 +367,10 @@ class PointCloudProcessorBase:
     def bf_2d_grid(self, cov, method, n_sample=1):
         """2D BF using sparser grids then denser grids"""
         sv_grid = self.twod_sv_grid
-        
+
         eigenvalues, _ = np.linalg.eigh(cov)         # auto sorted in ascending order
         eigenvalues = np.flip(eigenvalues)                      # reverse to descending order
-        n_obj = self.estimate_n_source(eigenvalues, 1)
+        n_obj = self.estimate_n_source(eigenvalues, n_sample)
         if n_obj == 0:
             return
         cov_inv = self.mat_inv(cov)
@@ -346,10 +399,8 @@ class PointCloudProcessorBase:
                     bf[top:bot, left:right] = np.maximum(bf[top:bot, left:right], bf_new)
                 last_gsize = cur_gsize
             if i == len(sv_grid) - 1:
-                # print(peak_local_max(bf, threshold_rel=0.25, num_peaks=n_obj))
-                # import pdb; pdb.set_trace()
                 break
-            peaks = peak_local_max(bf, threshold_rel=0.25, num_peaks=n_obj)
+            peaks = self.find_peaks_2d(bf, th=0.25, n_peaks=n_obj)
             if len(peaks) == 0:
                 return
         return bf
@@ -406,19 +457,22 @@ class PointCloudProcessorBase:
             # print(f'Progress {i/X.shape[2]*100:.1f}%', end='\r')
             all_rx = X[:, :, i]           # (12, 50)
             cov = self.covariance_matrix(all_rx)
+            eigenvalues, _ = np.linalg.eigh(cov)         # auto sorted in ascending order
+            eigenvalues = np.flip(eigenvalues)                      # reverse to descending order
+            n_obj = self.estimate_n_source(eigenvalues, X.shape[1])
+            if n_obj == 0:
+                continue
+            # tmp.append(n_obj)
+
             # bf = self.bf_2d(cov, sv, method)
             bf = self.bf_2d_grid(cov, method, n_sample=all_rx.shape[1])
             if bf is None:
                 continue
 
-            eigenvalues, _ = np.linalg.eigh(cov)         # auto sorted in ascending order
-            eigenvalues = np.flip(eigenvalues)                      # reverse to descending order
-            n_obj = self.estimate_n_source(eigenvalues, X.shape[1])
-            tmp.append(n_obj)
-
-            peaks = peak_local_max(bf, threshold_rel=0.25, num_peaks=n_obj)
+            peaks = self.find_peaks_2d(bf, th=0.25, n_peaks=n_obj)
+            d = self.dis[i]
+            # peaks = self.diffuse_2d(peaks, bf.shape[1], bf.shape[0])
             for wz, wx in peaks:
-                d = self.dis[i]
                 x, y, z = self.xyz_estimate(d, self.fft_freq_a[wx], self.fft_freq_a[wz])
                 res.append((x, y, z))
         res = np.asarray(res).reshape((-1, 3))
@@ -461,11 +515,14 @@ class PointCloudProcessorBase:
                 continue
 
             azimuth_bf = self.bf(cov_azimuth, azimuth_sv, method, n_sample=self.n_doppler_fft)
-            wxs = self.find_peaks(azimuth_bf, n_peak=n_obj)
+            wxs = self.find_peaks(azimuth_bf, n_peaks=n_obj)
             # wxs = self.fft_freq_a[wxs]
             if len(wxs) == 0:
                 continue
-            
+
+            v = self.vel[detection_list[i, 0]]
+            d = self.dis[detection_list[i, 1]]
+
             # elevation
             # cov_all = self.covariance_matrix(all_rx, dl=True)
             for wx in wxs:
@@ -473,11 +530,9 @@ class PointCloudProcessorBase:
                 elevation_sv = self.twod_sv[:, :, wx]
                 elevation_bf = self.bf(cov_elevation, elevation_sv, method, n_sample=self.n_doppler_fft)
                 # assert np.allclose(elevation_bf, self.bf_raw(cov_elevation, elevation_sv, method))
-                wzs = self.find_peaks(elevation_bf, n_peak=n_obj)
+                wzs = self.find_peaks(elevation_bf, n_peaks=n_obj)
                 # wzs = self.fft_freq_a[peaks]
                 for wz in wzs:
-                    v = self.vel[detection_list[i, 0]]
-                    d = self.dis[detection_list[i, 1]]
                     x, y, z = self.xyz_estimate(d, self.fft_freq_a[wx], self.fft_freq_a[wz])
                     res.append((x, y, z, v))
         res = np.asarray(res).reshape((-1, 4))
@@ -505,20 +560,22 @@ class PointCloudProcessorBase:
         for i in range(n_objs):
             # print(f'Progress {i/n_objs*100:.1f}%', end='\r')
             all_rx = X[:, detection_list[i, 0], detection_list[i, 1]]           # (12)
+
             cov = self.covariance_matrix(all_rx)
+            eigenvalues, _ = np.linalg.eigh(cov)         # auto sorted in ascending order
+            eigenvalues = np.flip(eigenvalues)                      # reverse to descending order
+            n_obj = self.estimate_n_source(eigenvalues, X.shape[1])
+            if n_obj == 0:
+                continue
             bf = self.bf_2d_grid(cov, method)
             # bf = self.bf_2d(cov, self.twod_sv, method)
             if bf is None:
                 continue
 
-            eigenvalues, _ = np.linalg.eigh(cov)         # auto sorted in ascending order
-            eigenvalues = np.flip(eigenvalues)                      # reverse to descending order
-            n_obj = self.estimate_n_source(eigenvalues, X.shape[1])
-
-            peaks = peak_local_max(bf, threshold_rel=0.25, num_peaks=n_obj)
+            peaks = self.find_peaks_2d(bf, th=0.25, n_peaks=n_obj)
+            v = self.vel[detection_list[i, 0]]
+            d = self.dis[detection_list[i, 1]]
             for wz, wx in peaks:
-                v = self.vel[detection_list[i, 0]]
-                d = self.dis[detection_list[i, 1]]
                 x, y, z = self.xyz_estimate(d, self.fft_freq_a[wx], self.fft_freq_a[wz])
                 res.append((x, y, z, v))
         res = np.asarray(res).reshape((-1, 4))
@@ -549,7 +606,7 @@ class PointCloudProcessorBase:
             all_rx = X[:, :, detection_list[i, 0]]           # (12, 50)
             wx = detection_list[i, 1]
             cov = self.covariance_matrix(all_rx)
-            
+
             sv = self.twod_sv[:, :, wx]
             bf = self.bf(cov, sv, method, n_sample=X.shape[1])
             if bf is None:
@@ -562,9 +619,9 @@ class PointCloudProcessorBase:
             if n_obj == 0:
                 continue
 
-            peaks = self.find_peaks(bf, n_peak=n_obj)
+            peaks = self.find_peaks(bf, n_peaks=n_obj)
+            d = self.dis[detection_list[i, 0]]
             for wz in peaks:
-                d = self.dis[detection_list[i, 0]]
                 x, y, z = self.xyz_estimate(d, self.fft_freq_a[wx], self.fft_freq_a[wz])
                 res.append((x, y, z))
         res = np.asarray(res).reshape((-1, 3))
@@ -591,7 +648,7 @@ class PointCloudProcessorBase:
             cnt += 1
         plt.legend()
         plt.show()
-          
+
     def bf_azimuth_per_frame(self, X, method=AoA.conventional, format='phi'):
         """Performs azimuth beamforming on the entire frame, return an angle power spectrum heatmap.
         For algorithm developing purpose only.
@@ -697,13 +754,15 @@ class PointCloudProcessorBase:
             plt.plot(mdl, label='mdl')
             plt.legend()
             plt.show()
+            import pdb
+            pdb.set_trace()
         return np.argmin(mdl)
 
     def mat_inv(self, X):
         try:
             return np.linalg.inv(X)
         except np.linalg.LinAlgError as err:
-            # print('[Warning] Singular covariance matrix detected. ')
+            # warnings.warn('[Warning] Singular covariance matrix detected. ')
             return None
 
     def nullspace(self, cov, n_sample):
@@ -712,7 +771,7 @@ class PointCloudProcessorBase:
         eigenvectors = np.flip(eigenvectors, axis=1)
         n_obj = self.estimate_n_source(eigenvalues, n_sample)
         if n_obj == 0:
-            # print('[Warning] zero data source detected')
+            # warnings.warn('[Warning] zero data source detected')
             return None
         nullvectors = eigenvectors[:, n_obj:]
         nullspace = nullvectors @ np.conj(nullvectors.T)
@@ -805,10 +864,10 @@ class PointCloudProcessorBase:
         # azimuth_vec[:, any, i] = self.steering_vector_1d(..)[:, i]
         azimuth_vec = np.exp(1j*np.einsum('i,jk->ijk', xs, np.pi*azimuth))      # (n_rx, n_angle, n_angle)
         elevation_vec = np.exp(1j*np.einsum('i,jk->ijk', zs, np.pi*elevation))  # (n_rx, n_angle, n_angle)
-        
+
         # res[:, i, j] = self.steering_vector_1d_elevation(.., angle[j])[:, i]
         # assert np.allclose(res[:, ii, jj], self.steering_vector_1d_elevation(rx, angles[jj], n_aoa_fft)[:, ii])
-        res = azimuth_vec * elevation_vec 
+        res = azimuth_vec * elevation_vec
         return res
 
     def steering_vector_2d_grid(self, rx, n_angles: list[int], theta_range=[-np.pi/2, np.pi/2], format='phi'):
@@ -830,7 +889,6 @@ class PointCloudProcessorBase:
             res.append(sv)
         return res
 
-
     def xyz_estimate(self, d, wx, wz):
         x = d*wx
         z = d*wz
@@ -851,25 +909,44 @@ class PointCloudProcessorBase:
         x = x*wavelength*fps/2
         return x
 
+
 class PointCloudProcessor(PointCloudProcessorBase):
-    def __init__(self, config, max_d=None, max_v=None, n_aoa_fft=64, range_fft_m=1, doppler_fft_m=1):
-        super().__init__(config, max_d, max_v, n_aoa_fft, range_fft_m, doppler_fft_m)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
     def search_task(self):
         tasks = []
-        for i in range(30, 60, 4):
-            tasks.append(f'th-{i}')
-        for win in range(64, 160, 16):
-            for guard in range(int(win/2), win-8, 8):
-                thr = [i for i in np.arange(12, 32, 2)]
-                for th in thr:
-                    tasks.append(f'go-{th:.3f}-{win}-{guard}')
-                    tasks.append(f'so-{th:.3f}-{win}-{guard}')
-                    tasks.append(f'os-{th:.3f}-{win}-{guard}')
-                    tasks.append(f'ca-{th:.3f}-{win}-{guard}')
+        win = 80
+        guard = 64
+        thr = list(np.arange(2, 16, 1))
+        for th in thr:
+            tasks.append(f'ca-{th:.3f}-{win}-{guard}')
         return tasks
-                    
-    def search(self, x, y, method, doppler:bool, npass=None, callback=None, prefix=None):
+
+        # for i in range(30, 60, 4):
+        #     tasks.append(f'th-{i}')
+        # for win in range(72, 90, 4):
+        #     for guard in range(win-32, win-14, 4):
+        #         thr = [i for i in np.arange(8, 16, 1)]
+        #         for th in thr:
+        #             tasks.append(f'ca-{th:.3f}-{win}-{guard}')
+        # return tasks
+
+        # Backup
+        # tasks = []
+        # for i in range(30, 60, 4):
+        #     tasks.append(f'th-{i}')
+        # for win in range(64, 160, 16):
+        #     for guard in range(int(win/2), win-8, 8):
+        #         thr = [i for i in np.arange(12, 32, 2)]
+        #         for th in thr:
+        #             tasks.append(f'go-{th:.3f}-{win}-{guard}')
+        #             tasks.append(f'so-{th:.3f}-{win}-{guard}')
+        #             tasks.append(f'os-{th:.3f}-{win}-{guard}')
+        #             tasks.append(f'ca-{th:.3f}-{win}-{guard}')
+        # return tasks
+
+    def search(self, x, y, method, doppler: bool, npass=None, callback=None, prefix=None):
         logname = f'search/'
         if prefix:
             logname = logname + prefix + '-'
@@ -879,14 +956,15 @@ class PointCloudProcessor(PointCloudProcessorBase):
         f = open(f'{logname}.csv', 'w')
         tasks = self.search_task()
         log(f'Searching {len(tasks)} tasks, saving to {logname}.csv')
-        res = np.zeros((len(tasks), 3))
+        res = np.zeros((len(tasks), N_METRICS))
         t1 = datetime.datetime.now()
         for i, t in enumerate(tasks):
-            res[i] = self.test(x, y, method, doppler, npass, t, n_trial=2)
+            res[i] = self.test(x, y, method, doppler, npass, t, n_trial=1)
             t2 = datetime.datetime.now()
             eta = ((t2-t1)/(i+1)*len(tasks)+t1).strftime('%m.%d-%H:%M')
             print(f'Progress {100*(i+1)/len(tasks):.2f}% [ETA {eta}]', end='\r')
-            f.write(f'{t}, {res[i, 0]:.4f}, {res[i, 1]:.4f}, {res[i, 2]:.4f}\n')
+            string = f'{t}, ' + ', '.join(f'{k:.4f}' for k in res[i]) + '\n'
+            f.write(string)
         f.close()
         t3 = datetime.datetime.now()
         best = np.max(res[:, 0])
@@ -896,7 +974,7 @@ class PointCloudProcessor(PointCloudProcessorBase):
         if callback is not None:
             callback(message)
 
-    def test(self, x, y, method, doppler:bool, npass=None, peak_2d=None, n_trial=None, progress=False):
+    def test(self, x, y, method, doppler: bool, npass=None, peak_2d=None, n_trial=None, progress=False, ret_npoints=False):
         """ Evaluate an algorithm on a dataset. 
 
         Parameters:
@@ -911,30 +989,35 @@ class PointCloudProcessor(PointCloudProcessorBase):
         Return: (mIoU, mean precision, mean Sensitivity)
         """
         # log('Test start')
-        n_data = x.shape[0]
+        n_data = x.shape[1]
         if n_trial is None:
-            n_trial = x.shape[1]
-        if n_trial > x.shape[1]:
+            n_trial = x.shape[0]
+        if n_trial > x.shape[0]:
             raise ValueError("n_trial larger than dataset")
         if doppler:
             func = self.generate_point_cloud_with_doppler
         else:
             func = self.generate_point_cloud
-        res = np.zeros((n_data, n_trial, 3))
+        res = np.zeros((n_trial, n_data, N_METRICS))
+        n_points = np.zeros((n_trial, n_data))
         t1 = datetime.datetime.now()
         cnt = 0
         total = n_data * n_trial
-        for i in range(n_data):
-            for j in range(n_trial):
+        for i in range(n_trial):
+            for j in range(n_data):
                 pc = func(x[i, j], method=method, npass=npass, peak_2d=peak_2d)
-                res[i, j] = Evaluator(pc, y[i, j]).run(print_result=False)
+                n_points[i, j] = pc.shape[0]
+                res[i, j] = Evaluator(pc, y[i, j]).run(print_result=False, norm=True)
                 cnt += 1
                 if progress:
                     t2 = datetime.datetime.now()
                     eta = ((t2-t1)/(cnt)*total+t1).strftime('%m.%d-%H:%M')
                     print(f'Progress {100*cnt/total:.2f}% [ETA {eta}]', end='\r')
+        n_points = np.mean(n_points, axis=(0, 1))
         res = np.mean(res, axis=(0, 1))
         # log(f'Test complete, mean IoU {res[0]:.2f}')
+        if ret_npoints:
+            return res, n_points
         return res
 
     def parse_peak_detection(self, name):
@@ -966,7 +1049,7 @@ class PointCloudProcessor(PointCloudProcessorBase):
         range_fft = range_fft[:, :, :self.n_range_fft_cut]
         doppler_fft = self.doppler_fft(range_fft)
         doppler_fft_sum = 20*np.log10(np.sum(np.abs(doppler_fft), axis=0))   # sum over all rx and convert to dB
-        # peaks = self.cfar2d(doppler_fft_sum, th=3, lim=self.n_range_fft_cut, 
+        # peaks = self.cfar2d(doppler_fft_sum, th=3, lim=self.n_range_fft_cut,
         #                        mode='SO', win=8, guard=3, debug=debug)
         # peaks = self.threshold(doppler_fft_sum, db=30)
 
@@ -986,7 +1069,7 @@ class PointCloudProcessor(PointCloudProcessorBase):
             self.plot_range_doppler_heatmap(doppler_fft_peaks, axs[1])
             plt.show()
         if method == AoA.fft:
-            point_cloud = self.aoa_fft_per_point(doppler_fft, peaks)
+            point_cloud = self.aoa_fft_per_point(doppler_fft, peaks, npass=npass)
         else:
             if npass == 1:
                 func = self.bf_per_point_2d
@@ -999,7 +1082,7 @@ class PointCloudProcessor(PointCloudProcessorBase):
         point_cloud = point_cloud[point_cloud[:, 1].argsort()]
         # print(point_cloud)
         return point_cloud
-            
+
     def generate_point_cloud(self, data, method=AoA.conventional, npass=2, batch_size=None, debug=False, peak_2d=None):
         range_fft = self.range_fft(data)
         range_fft = range_fft[:, :, :self.n_range_fft_cut]
@@ -1066,8 +1149,8 @@ class PointCloudProcessor(PointCloudProcessorBase):
 
         # azimuth_spectrum = np.log2(azimuth_spectrum)
         azimuth_spectrum = azimuth_spectrum/azimuth_spectrum.max()
-        
-        x = self.angle_phi if format=='phi' else self.angle
+
+        x = self.angle_phi if format == 'phi' else self.angle
         x = x/np.pi*180
         plt.plot(x, azimuth_spectrum)
         plt.show()
@@ -1078,7 +1161,7 @@ class PointCloudProcessor(PointCloudProcessorBase):
         if method == AoA.fft:
             range_azimuth = self.aoa_fft_azimuth(range_fft, per_range=True)
             if format == 'theta':
-                print('Warning: Forcing FFT result to be in phi.')
+                warnings.warn('Warning: Forcing FFT result to be in phi.')
                 format = 'phi'
         else:
             range_azimuth = self.bf_per_range_azimuth(range_fft, method=method, format=format)
@@ -1093,7 +1176,7 @@ class PointCloudProcessor(PointCloudProcessorBase):
         doppler_fft_sum = np.abs(np.sum(doppler_fft, axis=0))   # sum over all rx
         doppler_fft_sum /= doppler_fft_sum.max()
         self.plot_range_doppler_heatmap(doppler_fft_sum)
-    
+
     def plot_range_doppler_heatmap(self, doppler_fft_mags, ax=None):
         """Plot the range doppler heatmap using range-doppler-fft output
         """
@@ -1146,18 +1229,19 @@ class PointCloudProcessor(PointCloudProcessorBase):
             ys = dis*np.sin(angle)
             ax.pcolormesh(ys, xs, range_azimuth.T)
             ax.set_facecolor(bg)
-            ax.set_ylim(bottom=0)    
-            ax.set_xlabel('X (m)')        
-            ax.set_ylabel('Y (m)')        
+            ax.set_ylim(bottom=0)
+            ax.set_xlabel('X (m)')
+            ax.set_ylabel('Y (m)')
             plt.show()
 
+
 class PointCloudParameterSearcher(PointCloudProcessor):
-    def __init__(self, dataset, config, max_d=None, max_v=None, n_aoa_fft=64, range_fft_m=1, doppler_fft_m=1, thread=None):
-        super().__init__(config, max_d, max_v, n_aoa_fft, range_fft_m, doppler_fft_m)
+    def __init__(self, dataset, *args, thread=None, **kwargs):
+        super().__init__(*args, **kwargs)
         self.dataset = dataset
         self.thread = 8 if not thread else thread
 
-    def search_mp(self, method, doppler:bool, npass=None, callback=None, prefix=None):
+    def search_mp(self, method, doppler: bool, npass=None, callback=None, prefix=None):
         tasks = []
         logname = f'search/'
         if prefix:
@@ -1165,17 +1249,21 @@ class PointCloudParameterSearcher(PointCloudProcessor):
         logname = logname + f'{self.id}-{method}-{npass}'
         if doppler:
             logname = logname + '-doppler'
+
+        if os.path.exists(f'{logname}.csv'):
+            log(f'Existing result {logname}.csv found')
+            return
         tasks = self.search_task()
         log(f'Searching {len(tasks)} tasks using {self.thread} threads, saving to {logname}.csv')
-        self.res = np.zeros((len(tasks), 3))
+        self.res = np.zeros((len(tasks), N_METRICS))
         self.cnt = 0
         self.total = len(tasks)
         self.t1 = datetime.datetime.now()
 
         pool = multiprocessing.Pool(self.thread)
         for i, t in enumerate(tasks):
-            pool.apply_async(self.test_wrapper, args=(i, method, doppler, npass, t, 2, ), 
-                                  callback=self.callback_succ, error_callback=self.callback_err)
+            pool.apply_async(self.test_wrapper, args=(i, method, doppler, npass, t, 2, ),
+                             callback=self.callback_succ, error_callback=self.callback_err)
 
         pool.close()
         pool.join()
@@ -1185,7 +1273,8 @@ class PointCloudParameterSearcher(PointCloudProcessor):
         res = self.res
         f = open(f'{logname}.csv', 'w')
         for i in range(self.total):
-            f.write(f'{tasks[i]}, {res[i, 0]:.4f}, {res[i, 1]:.4f}, {res[i, 2]:.4f}\n')
+            string = f'{tasks[i]}, ' + ', '.join(f'{k:.4f}' for k in res[i]) + '\n'
+            f.write(string)
         f.close()
 
         best = np.max(res[:, 0])
@@ -1197,7 +1286,7 @@ class PointCloudParameterSearcher(PointCloudProcessor):
         del self.res
 
     def test_wrapper(self, i, *args):
-        dataset = IFDataset('FAUST', self.config)
+        dataset = IFDataset(self.dataset, self.config)
         train_x, train_y = dataset.load(train=True)
         return (i, self.test(train_x, train_y, *args))
 
@@ -1212,3 +1301,106 @@ class PointCloudParameterSearcher(PointCloudProcessor):
 
     def callback_err(self, e):
         print(e)
+
+
+class PointCloudTester(PointCloudParameterSearcher):
+    def __init__(self, dataset, *args, thread=None, **kwargs):
+        super().__init__(dataset, *args, thread=thread, **kwargs)
+
+    def make_fig(self, i, method, doppler: bool, npass, peak_2d, prefix=None):
+        taskname = ''
+        if prefix:
+            taskname = taskname + prefix + '-'
+        taskname = taskname + f'{self.id}-{method}-{npass}'
+        if doppler:
+            taskname = taskname + '-doppler'
+
+        if peak_2d == 'auto':
+            csvname = f'search/{taskname}.csv'
+            peak_2d = read_csv(csvname)
+        
+        figname = f'test/figs/{taskname}'
+        dataset = IFDataset(self.dataset, self.config)
+        x, y = dataset.load(train=False)
+        data = x[i, 0]
+        dataset_mesh = DatasetMesh('FAUST')
+        mesh = dataset_mesh[i]
+        if doppler:
+            func = self.generate_point_cloud_with_doppler
+        else:
+            func = self.generate_point_cloud
+        pc = func(data, method=method, npass=npass, peak_2d=peak_2d)
+        save_one_fig(figname, pc, mesh, view='front')
+        save_one_fig(figname, pc, mesh, view='left')
+
+    def test_mp(self, method, doppler: bool, npass, peak_2d, n_trial=None, prefix=None, callback=None):
+        taskname = ''
+        if prefix:
+            taskname = taskname + prefix + '-'
+        taskname = taskname + f'{self.id}-{method}-{npass}'
+        if doppler:
+            taskname = taskname + '-doppler'
+
+        if peak_2d == 'auto':
+            csvname = f'search/{taskname}.csv'
+            peak_2d = read_csv(csvname)
+
+        logname = f'test/{taskname}'
+        dataset = IFDataset(self.dataset, self.config)
+        x, y = dataset.load(train=False)
+
+        if n_trial is None:
+            n_trial = x.shape[0]
+        if n_trial > x.shape[0]:
+            raise ValueError("n_trial larger than dataset")
+        n_data = x.shape[1]
+        self.total = n_trial * n_data
+
+        log(f'Testing {n_data} data {n_trial} times using {self.thread} threads, saving to {logname}.npy')
+        self.res = np.zeros((n_trial, n_data, N_METRICS))
+        self.n_points = np.zeros((n_trial, n_data))
+        self.cnt = 0
+        self.t1 = datetime.datetime.now()
+
+        pool = multiprocessing.Pool(self.thread)
+        for i in range(n_trial):
+            for j in range(n_data):
+                pool.apply_async(self.test_wrapper, args=(i, j, method, doppler, npass, peak_2d, n_trial, ),
+                                 callback=self.callback_succ, error_callback=self.callback_err)
+        pool.close()
+        pool.join()
+
+        t3 = datetime.datetime.now()
+        np.save(f'{logname}.npy', self.res)
+        np.save(f'{logname}-npoints.npy', self.n_points)
+        avg = np.mean(self.res, axis=(0, 1))
+
+        message = f'Test finished in {t3-self.t1}, saved to {logname}.npy, res {avg}'
+        log(message)
+        if callback is not None:
+            callback(message)
+        del self.res
+
+    def test_each(self, x, y, method, doppler, npass, peak_2d, n_trial):
+        if doppler:
+            func = self.generate_point_cloud_with_doppler
+        else:
+            func = self.generate_point_cloud
+        pc = func(x, method=method, npass=npass, peak_2d=peak_2d)
+        res = Evaluator(pc, y).run(print_result=False, norm=True)
+        return res, pc.shape[0]
+
+    def test_wrapper(self, i, j, *args):
+        dataset = IFDataset(self.dataset, self.config)
+        x, y = dataset.load(train=False)
+        return (i, j, self.test_each(x[i, j], y[i, j], *args))
+
+    def callback_succ(self, res):
+        self.cnt += 1
+        i, j, (res, n_points) = res
+        self.res[i, j] = res
+        self.n_points[i, j] = n_points
+        t1 = self.t1
+        t2 = datetime.datetime.now()
+        eta = ((t2-t1)/(self.cnt)*self.total+t1).strftime('%m.%d-%H:%M')
+        print(f'Progress {100*(self.cnt)/self.total:.2f}% [ETA {eta}]', end='\r')

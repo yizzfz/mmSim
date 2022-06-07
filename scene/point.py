@@ -26,3 +26,8 @@ class Point:
 
     def register(self, *info):
         self.motion.register(*info)
+
+    def get_average_pos(self):
+        if self.path is None:
+            self.path = self.motion.move(self.pos)
+        return np.mean(self.path, axis=0)

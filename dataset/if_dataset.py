@@ -9,6 +9,8 @@ import hashlib
 import numpy as np
 import datetime
 import h5py
+import multiprocessing
+import time
 
 IF_datasets = {
     'human': ['FAUST', 'DynamicFAUST']
@@ -31,7 +33,7 @@ class IFDataset:
         for f in files:
             self.exist = self.exist and os.path.isfile(os.path.join(self.fullpath, f))
 
-        self.config = config
+        self.config = config.copy()
         if self.exist:
             pass
             # print('Existing dataset found')
@@ -40,6 +42,9 @@ class IFDataset:
 
     def get_path(self):
         return self.fullpath
+
+    def constructed(self):
+        return self.exist
 
     def load(self, train=False):
         if not self.exist:
@@ -50,7 +55,7 @@ class IFDataset:
         f = h5py.File(filename, 'r')
         return f['x'], f['y']
 
-    def construct(self, callback=None, n_trial=10, split=None):
+    def construct(self, callback=None, n_trial=10, split=None, thread=8):
         log(f'Constructing {self.name}')
         if not os.path.exists(self.fullpath):
             os.mkdir(self.fullpath)
@@ -84,58 +89,59 @@ class IFDataset:
             n_train = len(Dataset(self.name, n_samples=1, train=True).dataset)
             train_x_shape = (n_trial, n_train, n_rx, self.config['steps'], self.config['samples_per_chirp'])
             train_y_shape = (n_trial, n_train, self.config['n_samples'], 3)
-            h5fd_train = h5py.File(os.path.join(self.fullpath, 'train.h5'), 'w')
-            h5fd_train.create_dataset('x', shape=train_x_shape, chunks=x_shape_batch, dtype=complex)
-            h5fd_train.create_dataset('y', shape=train_y_shape, chunks=y_shape_batch, dtype=float)
-            train_x = h5fd_train['x']
-            train_y = h5fd_train['y']
-
+            
         if construct_test:
             n_test = len(Dataset(self.name, n_samples=1, train=False).dataset)
             test_x_shape = (n_trial, n_test, n_rx, self.config['steps'], self.config['samples_per_chirp'])
             test_y_shape = (n_trial, n_test, self.config['n_samples'], 3)
-            h5fd_test = h5py.File(os.path.join(self.fullpath, 'test.h5'), 'w')
-            h5fd_test.create_dataset('x', shape=test_x_shape, chunks=x_shape_batch, dtype=complex)
-            h5fd_test.create_dataset('y', shape=test_y_shape, chunks=y_shape_batch, dtype=float)
-            test_x = h5fd_test['x']
-            test_y = h5fd_test['y']
+
         snr_train = np.zeros((n_trial, n_train))
         snr_test = np.zeros((n_trial, n_test))
-        n_total = (n_train + n_test) * n_trial
+        self.total = (n_train + n_test) * n_trial
+        self.cnt = 0
 
-        t1 = datetime.datetime.now()
-        cnt = 0
+        Q = multiprocessing.Manager().Queue()
+        pool = multiprocessing.Pool(thread)
+        pool.apply_async(self.write_to_file, args=(Q, construct_train, construct_test,  
+                                                   x_shape_batch, y_shape_batch,
+                                                   train_x_shape,
+                                                   train_y_shape,
+                                                   test_x_shape,
+                                                   test_y_shape, ))
+
+        self.t1 = datetime.datetime.now()
         if construct_train:
+            jobs = []
+            self.snr_train = snr_train
             for i in range(n_trial):
                 train_pc = Dataset(self.name, n_samples=self.config['n_samples'], distance=self.config['distance'], train=True).dataset
                 for j in range(n_train):
                     pos = train_pc[j].pos.numpy()
                     scene = [Point(pos, motion=m)]
-                    simulator = Simulator(radars, scene, simulation_period, fps)
-                    train_x[i, j], snr_train[i, j] = simulator.run(ret_snr=True)
-                    train_y[i, j] = pos
-                    cnt += 1
-                    t2 = datetime.datetime.now()
-                    eta = ((t2-t1)/cnt*n_total+t1).strftime('%m.%d-%H:%M')
-                    print(f'Dataset progress {cnt/n_total*100:.1f}% [ETA {eta}]', end='\r')
-            self.config['snr_train'] = np.mean(snr_train)
-            h5fd_train.close()
+                    j = pool.apply_async(self.task_wrapper, args=(Q, True, i, j, radars, scene, simulation_period, fps, ),
+                                         callback=self.callback_succ, error_callback=self.callback_err)
+                    jobs.append(j)
+            for j in jobs:
+                j.get()
+            self.config['snr_train'] = np.mean(self.snr_train)
 
         if construct_test:
+            jobs = []
+            self.snr_test = snr_test
             for i in range(n_trial):
                 test_pc = Dataset(self.name, n_samples=self.config['n_samples'], distance=self.config['distance'], train=False).dataset
                 for j in range(n_test):
                     pos = test_pc[j].pos.numpy()
                     scene = [Point(pos, motion=m)]
-                    simulator = Simulator(radars, scene, simulation_period, fps)
-                    test_x[i, j], snr_test[i, j] = simulator.run(ret_snr=True)
-                    test_y[i, j] = pos
-                    cnt += 1
-                    t2 = datetime.datetime.now()
-                    eta = ((t2-t1)/cnt*n_total+t1).strftime('%m.%d-%H:%M')
-                    print(f'Dataset progress {cnt/n_total*100:.1f}% [ETA {eta}]', end='\r')
-            self.config['snr_test'] = np.mean(snr_test)
-            h5fd_test.close()
+                    j = pool.apply_async(self.task_wrapper, args=(Q, False, i, j, radars, scene, simulation_period, fps, ),
+                                         callback=self.callback_succ, error_callback=self.callback_err)
+                    jobs.append(j)
+            for j in jobs:
+                j.get()
+            self.config['snr_test'] = np.mean(self.snr_test)
+        Q.put('kill')
+        pool.close()
+        pool.join()
         
         with open(os.path.join(self.fullpath, 'config.json'), 'a') as f:
             json.dump(self.config, f, indent=2)
@@ -145,4 +151,64 @@ class IFDataset:
         if callback is not None:
             callback(message)
 
+    def task_wrapper(self, Q, isTrain, i, j, radars, scene, simulation_period, fps):
+        simulator = Simulator(radars, scene, simulation_period, fps)
+        x, snr = simulator.run(ret_snr=True)
+        pos = scene[0].get_average_pos()
+        Q.put((isTrain, i, j, x, pos))
+        return (isTrain, i, j, snr)
 
+    def callback_succ(self, res):
+        self.cnt += 1
+        (isTrain, i, j, snr) = res
+        if isTrain:
+            self.snr_train[i, j] = snr
+        else:
+            self.snr_test[i, j] = snr
+        t1 = self.t1
+        t2 = datetime.datetime.now()
+        eta = ((t2-t1)/(self.cnt)*self.total+t1).strftime('%m.%d-%H:%M')
+        print(f'Progress {100*(self.cnt)/self.total:.2f}% [ETA {eta}]', end='\r')
+
+    def callback_err(self, e):
+        print(e)
+
+    def write_to_file(self, Q, construct_train, construct_test, 
+                      x_shape_batch=None,
+                      y_shape_batch=None,
+                      train_x_shape=None, 
+                      train_y_shape=None, 
+                      test_x_shape=None, 
+                      test_y_shape=None, 
+                      ):
+        if construct_train:
+            h5fd_train = h5py.File(os.path.join(self.fullpath, 'train.h5'), 'w')
+            h5fd_train.create_dataset('x', shape=train_x_shape, chunks=x_shape_batch, dtype=complex)
+            h5fd_train.create_dataset('y', shape=train_y_shape, chunks=y_shape_batch, dtype=float)
+            train_x = h5fd_train['x']
+            train_y = h5fd_train['y']
+
+        if construct_test:
+            h5fd_test = h5py.File(os.path.join(self.fullpath, 'test.h5'), 'w')
+            h5fd_test.create_dataset('x', shape=test_x_shape, chunks=x_shape_batch, dtype=complex)
+            h5fd_test.create_dataset('y', shape=test_y_shape, chunks=y_shape_batch, dtype=float)
+            test_x = h5fd_test['x']
+            test_y = h5fd_test['y']
+
+        while True:
+            if Q.empty():
+                time.sleep(10)
+                continue
+            msg = Q.get()
+            if msg == 'kill':
+                break
+            isTrain, i, j, x, y = msg
+            if isTrain:
+                train_x[i, j] = x
+                train_y[i, j] = y
+            else:
+                test_x[i, j] = x
+                test_y[i, j] = y
+        h5fd_train.close()
+        h5fd_test.close()
+            

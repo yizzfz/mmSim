@@ -4,7 +4,7 @@ from scipy.ndimage import gaussian_filter1d
 import matplotlib.pyplot as plt
 from algo import phase_tracking, get_aaed_phase, phase_difference, lowpass
 from algo import wavelet_v1 as wavelet
-from skimage.feature import peak_local_max
+from algo import get_aaed_phase_DACM
 from scipy.signal import find_peaks
 
 
@@ -15,15 +15,24 @@ class VitalSignProcessor:
         self.tracking_win = tracking_win
         self.smoothing_win = smoothing_win
         self.bin_change_rate = bin_change_rate
-        self.last_path = None
+        self.pathQ = deque(maxlen=10)
+        self.path_init = None
         self.downsample = downsample
+
+    def get_path(self, fft_mags, init=None):
+        fft_peaks = phase_tracking(
+            fft_mags, sigma=self.bin_change_rate, win=self.tracking_win, init=init)
+        fft_peaks = gaussian_filter1d(fft_peaks.astype(float), self.smoothing_win, mode='nearest')
+        return fft_peaks
+
+    def get_aaed_phase(self, fft_phases, fft_peaks):
+        return get_aaed_phase(fft_phases, fft_peaks)
 
     def generate_phase_signal(self, fft_mags, fft_phases, init=None, debug=False, ret_path=False):
         if fft_mags.shape != fft_phases.shape or len(fft_mags.shape) != 2:
-            raise ValueError(f'Incorrect data shape for fft_mags {fft_mags.shape}')
-        fft_peaks = phase_tracking(
-            fft_mags, sigma=self.bin_change_rate, win=self.tracking_win, init=init)
-        fft_peaks = gaussian_filter1d(fft_peaks.astype(float), self.smoothing_win)
+            raise ValueError(f'Incorrect data shape, fft_mags {fft_mags.shape}, fft_phases {fft_phases.shape}')
+        fft_peaks = self.get_path(fft_mags, init)
+
         # fft_peaks = np.ones(fft_mags.shape[0])*np.argmax(np.sum(fft_mags, axis=0))
         phases = get_aaed_phase(fft_phases, fft_peaks)
         phases = phases[::self.downsample]
@@ -49,29 +58,73 @@ class VitalSignProcessor:
             return phases, fft_peaks
         return phases
 
+
+    def generate_phase_signal_DACM(self, ffts, init=None, debug=False, ret_path=False):
+        fft_peaks = phase_tracking(
+            np.abs(ffts), sigma=self.bin_change_rate, win=self.tracking_win, init=init)
+        fft_peaks = gaussian_filter1d(fft_peaks.astype(float), self.smoothing_win, mode='nearest')
+
+        # fft_peaks = np.ones(fft_mags.shape[0])*np.argmax(np.sum(fft_mags, axis=0))
+        fft_phases = np.angle(ffts)/np.pi
+        phases = get_aaed_phase_DACM(ffts, fft_peaks)
+        phases = phases[::self.downsample]
+        if ret_path:
+            return phases, fft_peaks
+        return phases
+
     def generate_phase_signal_cont(self, fft_mags, fft_phases, ret_path=False):
+        """
+        Parameters:
+            fft_mags: (n_chirps, n_samples)
+            fft_phases: (n_chirps, n_samples)
+            ret_path: bool, return fft range bin path or not.
+        
+        Return:
+            phase signal with length (n_chirps/downsample),
+            and bin path in ret_path is True.
+        """
         if fft_mags.shape != fft_phases.shape or len(fft_mags.shape) != 2:
             raise ValueError(f'Incorrect data shape for fft_mags {fft_mags.shape}')
-        init = None
-        if self.last_path is not None:
-            if self.last_path[-1] < 15:
-                self.last_path = None
-            else:
-                init = self.last_path[-1]
 
         fft_peaks = phase_tracking(
-            fft_mags, sigma=self.bin_change_rate, win=self.tracking_win, init=init)
-        if self.last_path is not None:
-            tmp = np.concatenate((self.last_path, fft_peaks))
-            fft_peaks_filtered = gaussian_filter1d(tmp.astype(float), self.smoothing_win)[self.last_path.shape[0]:]
-        else:
-            fft_peaks_filtered = gaussian_filter1d(fft_peaks.astype(float), self.smoothing_win)
-        phases = get_aaed_phase(fft_phases, fft_peaks_filtered)
+            fft_mags, sigma=self.bin_change_rate, win=self.tracking_win, init=self.path_init)
+        self.pathQ.append(fft_peaks)
+
+        path_all = np.concatenate(self.pathQ)
+        path = gaussian_filter1d(path_all, self.smoothing_win, mode='nearest')[-fft_peaks.shape[0]:]
+
+        if path[-1] > 15:       # valid path
+            if self.path_init is not None and np.abs(path[0]-self.path_init) < 15:
+                path = path + self.path_init - path[0]
+            self.path_init = path[-1]
+        else:                   # invalid path
+            self.path_init = None
+            self.pathQ = deque(maxlen=10)
+
+        phases = get_aaed_phase(fft_phases, path)
         phases = phases[::self.downsample]
-        self.last_path = fft_peaks
+
         if ret_path:
-            return phases, fft_peaks_filtered
+            return phases, path
         return phases
+
+    def generate_multi_phase_signal(self, fft_mags, fft_phases, n, init=None, debug=False, ret_path=False):
+        if fft_mags.shape != fft_phases.shape or len(fft_mags.shape) != 2:
+            raise ValueError(f'Incorrect data shape for fft_mags {fft_mags.shape}')
+        max_bin = fft_mags.shape[1]-1
+        fft_peaks = phase_tracking(
+            fft_mags, sigma=self.bin_change_rate, win=self.tracking_win, init=init)
+        fft_peaks = gaussian_filter1d(fft_peaks.astype(float), self.smoothing_win, mode='nearest')
+        phases = np.zeros((n*2+1, int(fft_mags.shape[0]/self.downsample)))
+        for i, k in enumerate(range(-n, n+1)):
+            path = fft_peaks + k
+            path[path<0] = 0
+            path[path>max_bin] = max_bin
+            phases[i] = get_aaed_phase(fft_phases, path)[::self.downsample]
+        if ret_path:
+            return phases, fft_peaks
+        return phases
+
 
     def bin_tracking_cont(self, fft_mags):
         init = None
@@ -87,7 +140,7 @@ class VitalSignProcessor:
         return fft_peaks
 
     def get_phase_signal_from_path(self, path, fft_phases):
-        path = gaussian_filter1d(path.astype(float), self.smoothing_win)
+        path = gaussian_filter1d(path.astype(float), self.smoothing_win, mode='nearest')
         phases = get_aaed_phase(fft_phases, path)
         phases = phases[::self.downsample]
         return phases
@@ -95,17 +148,14 @@ class VitalSignProcessor:
     def phase_diff(self, x):
         return phase_difference(x)
     
-    def wavelet(self, x, wavelet_width=0.1, wavelet_func='morl', border=0.05):
+    def wavelet(self, x, wavelet_width=0.1, wavelet_func='cmor1-0.5', border=0.05):
         wavelet_width = self.config['fps']/self.downsample*wavelet_width
         return np.abs(wavelet(x, wavelet_width=wavelet_width, wavelet_func=wavelet_func, border=border))
 
-    def find_peaks(self, x, border=0.05, debug=False):
+    def find_peaks(self, x, debug=False):
         fps = self.config['fps']/self.downsample
-        steps = x.shape[0]
-        border = int(steps*border)
-
-        x = lowpass(x, cutoff=0.1)
-        peaks = find_peaks(x, distance=int(fps*0.35), height=0.2 *
+        x = x/x.max()
+        peaks = find_peaks(x, distance=int(fps*0.3), height=0.2 *
                            x.max(), prominence=0.1)[0]
         # peaks = peak_local_max(x, min_distance=int(0.3*fps), threshold_rel=0.2, exclude_border=True)
         # peaks = np.sort(peaks.flatten())
