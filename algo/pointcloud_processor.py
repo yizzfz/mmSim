@@ -32,7 +32,7 @@ class PointCloudProcessorBase:
             n_aoa_fft: number of bins when calculating the angle-of-arrival. More bins can give better resolution. 
             range_fft_m: control the zero padding when applying the range-FFT.
             doppler_fft_m: control the zero padding when applying the Doppler-FFT.
-            aoa_fft_flag: 0 for old style angle-FFT for 1443 type anntenna, 1 for 2D angle-FFT, None for auto.
+            aoa_fft_flag: 0 for old style angle-FFT for 1443 type antennas, 1 for 2D angle-FFT, None for auto.
             srpc_a: hyperparameter of SRPC algorithm on range domain.
             srpc_r: hyperparameter of SRPC algorithm on angle domain.
             output_size: maximum number of points of the output point cloud.
@@ -62,7 +62,7 @@ class PointCloudProcessorBase:
             if len(self.rx_config.elevation_rx) > 1 and self.rx_config.elevation_rx[1].shape[0] > 2:
                 self.aoa_fft_flag = 1       # can use a 2D FFT or two 1D FFTs
             else:
-                self.aoa_fft_flag = 0       # use the old style FFT for 1443 type anntenna
+                self.aoa_fft_flag = 0       # use the old style FFT for 1443 type antenna
 
         if max_d:   # cap range-FFT result with a maximum distance
             ADC_rate = self.config['ADC_rate']
@@ -319,7 +319,7 @@ class PointCloudProcessorBase:
         return res
 
     def aoa_fft_per_point(self, X, detection_list, return_velocity=False, npass=None, rd_spectrum=None):
-        """Performs AoA FFT given FFT data matrix and CFAR dection list, return a point cloud
+        """Performs AoA FFT given FFT data matrix and CFAR detection list, return a point cloud
 
         Parameters:
             X: [n_range_fft, n_doppler_fft/n_chirps] array, first dimension is range, second dimension is Doppler.

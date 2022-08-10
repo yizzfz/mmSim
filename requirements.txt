@@ -1,9 +1,8 @@
 numpy
 scipy
 h5py
-PyWavelets
 matplotlib
 scikit-image
 pytorch
 torch_geometric
-openmesh-python
+open3d

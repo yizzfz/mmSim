@@ -17,7 +17,15 @@ IF_datasets = {
 }
 
 class IFDataset:
+    """Build a IF signal dataset that contains simulation data generated based on the point cloud dataset, 
+    for evaluating the point cloud construction algorithms without running the simulation every time."""
     def __init__(self, name, config, location=None):
+        """
+        Parameters:
+            name: name of the dataset.
+            config: scene configuration of the dataset. This is used as the unique identifier when loading the dataset.
+            location: folder to save the dataset.
+        """
         if location is None:
             computer_name = os.environ['COMPUTERNAME']
             location = computer_loc.get(computer_name)
@@ -26,9 +34,9 @@ class IFDataset:
         if not os.path.exists(os.path.join(location, 'if')):
             os.mkdir(os.path.join(location, 'if'))
         self.name = name
-        self.id = config_to_id(config, name=name)
+        self.id = config_to_id(config, name=name)       # unique id based on the configuration
         self.fullpath = os.path.join(location, 'if', self.id)
-        files = ['train.h5', 'test.h5', 'config.json']
+        files = ['train.h5', 'test.h5', 'config.json']  # a constructed dataset should have these files
         self.exist = os.path.isdir(self.fullpath)
         for f in files:
             self.exist = self.exist and os.path.isfile(os.path.join(self.fullpath, f))
@@ -41,14 +49,20 @@ class IFDataset:
             print('New dataset. Awaiting construction')
 
     def get_path(self):
+        """Full path of the dataset."""
         return self.fullpath
 
     def constructed(self):
+        """Check if the dataset has been constructed."""
         return self.exist
 
     def load(self, train=False):
+        """Load the dataset. 
+        Returns the signal (n_trial, n_model, n_rx, n_chirps, n_samples)
+        and the ground truth (n_trial, n_model, n_points).
+        """
         if not self.exist:
-            raise ValueError('Dataset empty, plase call the construct function')
+            raise ValueError('Dataset empty, please call the construct function')
         filename = os.path.join(self.fullpath, 'train.h5' if train else 'test.h5')
         if not os.path.isfile(filename):
             raise ValueError(f'{filename} not exist')
@@ -56,6 +70,15 @@ class IFDataset:
         return f['x'], f['y']
 
     def construct(self, callback=None, n_trial=10, split=None, thread=8):
+        """Construct the dataset using the simulator (support multithreading).
+        Once constructed, the data can be load by calling the `load` function.
+        
+        Parameters:
+            n_trial: each simulation is run multiple times to reduce randomness.
+            split: 'train', 'test', or None for both.
+            thread: how many threads to use.
+            callback: callback function to be called on finish.
+        """
         log(f'Constructing {self.name}')
         if not os.path.exists(self.fullpath):
             os.mkdir(self.fullpath)
