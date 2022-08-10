@@ -8,8 +8,8 @@ import json
 import cv2
 import pandas as pd
 
-# find the highest value in an FFT, return (idx, mag, phase)
 def get_FFT_peak(data):
+    """find the highest value in an FFT, return a list of (idx, mag, phase)"""
     mag = np.abs(data)
     # mag[:20] = 0            # ignore signal too close
     phases = np.angle(data)
@@ -18,10 +18,12 @@ def get_FFT_peak(data):
     return (peak_idx, mag[peak_idx], phases[peak_idx])
 
 def log(message):
+    """Log a message to console with timestamp"""
     ts = datetime.datetime.now().strftime('%H:%M')
     print(f'[{ts}] {message}')
 
 def prepare_display(data, data_gt=None, mesh=None, origin=[0, 0, 0], show_radar=False, voxel=False):
+    """Use open3d to display point cloud or mesh models"""
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(data)
     pcd.colors = o3d.utility.Vector3dVector(np.tile(np.array([1, 0, 0]), (data.shape[0], 1)))
@@ -48,7 +50,7 @@ def prepare_display(data, data_gt=None, mesh=None, origin=[0, 0, 0], show_radar=
     return display
 
 def plot_point_cloud_o3d(data, data_gt=None, mesh=None, voxel=False, origin=[0, 0, 0], show_radar=False, video=False, view='front'):
-    """The x, y, z axis will be rendered as red, green, and blue arrows respectively
+    """Plot a point cloud. The x, y, z axis will be rendered as red, green, and blue arrows respectively
     """
     display = prepare_display(data, data_gt, mesh, origin, show_radar, voxel=voxel)
     vis = o3d.visualization.Visualizer()
@@ -72,9 +74,10 @@ def plot_point_cloud_o3d(data, data_gt=None, mesh=None, voxel=False, origin=[0, 
         # plt.imsave(f"{ts}.png", np.asarray(image), dpi=1)
         vis.destroy_window()
 
-def o3d_video(vis, video):
+def o3d_video(vis, videoname):
+    """Plot 3D models and make a video"""
     fourcc = cv2.VideoWriter_fourcc(*'DIVX')
-    o3d_video.vw = cv2.VideoWriter(f'tmp/simulation-pointcloud-{video}.avi', fourcc, 30.0, (1920, 1080), True)
+    o3d_video.vw = cv2.VideoWriter(f'{videoname}.avi', fourcc, 30.0, (1920, 1080), True)
     o3d_video.cnt = 0
     def rotate_and_capture(vis):
         ctr = vis.get_view_control()
@@ -94,6 +97,7 @@ def o3d_video(vis, video):
     vis.destroy_window()
 
 def config_to_id(config, name=None):
+    """Compute unique hash ID from a dict"""
     if name is not None:
         return name + '-' + hashlib.sha1(json.dumps(config, sort_keys=True).encode()).hexdigest()
     return hashlib.sha1(json.dumps(config, sort_keys=True).encode()).hexdigest()
@@ -111,6 +115,7 @@ def read_csv(datafile):
     return first[0]
 
 def save_one_fig(figname, pcd, mesh=None, view='front'):
+    """Plot a point cloud and make a snapshot."""
     pcd_o3d = o3d.geometry.PointCloud()
     pcd_o3d.points = o3d.utility.Vector3dVector(pcd)
     pcd_o3d.colors = o3d.utility.Vector3dVector(np.tile(np.array([0, 0, 1]), (pcd.shape[0], 1)))
