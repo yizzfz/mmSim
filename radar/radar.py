@@ -4,24 +4,37 @@ from collections.abc import Sequence
 from .rx_config import RxConfig
 
 class Radar:
+    """Radar module that defines the location and antenna configuration of the radar (1 transimiter 1 receiver)."""
     cnt = 0
     def __init__(self, Tx_pos=(0, 0, 0), Rx_pos=None, f1=77e9, slope=40e12, ADC_rate=15e6, chirp_time=100e-6, phase_shift=0, noise=None):
+        """
+        Parameters:
+            Tx_pos: location of the transimitter.
+            Rx_pos: location of the receivers. Default to be the same as the transimitter.
+            f1: chirp start frequency in Hz.
+            slope: chirp slope in Hz/s.
+            ADC_rate: ADC sampling rate in Hz.
+            chirp_time: the duration of a chirp in seconds.
+            phase_shift: apply a phase shift to the antenna, default 0.
+            noise: add a Gaussian white noise of power `noise` dB (in relative to the hardware thermal noise) to the simulation.   
+        """
         self.f1 = f1
         self.slope = slope
         self.Tx_pos = Tx_pos
         self.Rx_pos = Rx_pos
         self.tx_f = f1
-        # self.tx_p = 0
-        self.c = 3e8
+        self.c = 3e8    # speed of light
         self.ADC_rate = ADC_rate
         self.chirp_time = chirp_time
         self.phase_shift = phase_shift
         self.rng = np.random.default_rng()
 
         wavelength = self.c / self.f1
+        # calculate the hardware thermal noise based on the radar equation
         self.K = 10 ** 2.6 * 1e-3 * wavelength**2 * 1e-2**2 * chirp_time / (4*np.pi)**3 / 4e-21
         self.noise = noise
         if noise is not None:
+            # calculate the expected standard deviation of the noise
             self.noise_std = (10**(noise/10)/2)**0.5    # convert dB to linear, calculate std for normal distribution
         # radar equation:
         # snr per chirp = P_tx * G_tx * G_rx * wavelength**2 * radar_cross_section * chirptime / ((4pi)**3 * kT * d**4)
@@ -35,19 +48,24 @@ class Radar:
         # print(f'[{self.name}] configured to {f1/1e9:.1f} GHz to {(f1+slope*chirp_time)/1e9:.1f} GHz')
 
     def A(self, d):
+        """Calculate the amplitude of the signal reaching an object at distance `d`"""
         return np.sqrt(self.K/d**4)
     
     def snr_db(self, d):
+        """Calculate the snr (dB to thermal noise) of the signal reaching an object at distance `d`"""
         return 10*np.log(self.K/d**4)
 
     def snr(self, d):
+        """Calculate the snr (ratio to thermal noise) of the signal reaching an object at distance `d`"""
         return self.K/d**4
 
     def distance_between(self, pos1, pos2):
+        """Euclidean distance between two points"""
         dis = np.linalg.norm(np.array(pos1)-np.array(pos2))
         return dis
 
     def dis_to(self, pos):
+        """The round trip distance between the radar to an object"""
         dis1 = self.distance_between(self.Tx_pos, pos)
         if self.Rx_pos is not None:
             dis2 = self.distance_between(self.Rx_pos, pos)
@@ -56,17 +74,19 @@ class Radar:
         return dis1+dis2
 
     def IF(self, t, dis):
+        """The IF signal resulted from an object"""
         tof = dis/self.c
         signal = np.exp(1j*(2*np.pi*self.slope*tof*t+2*np.pi*self.f1*tof-np.pi*self.slope*tof*tof+self.phase_shift))        
         amplitude = self.A(dis/2)
         return amplitude * signal
 
     def freqz(self, dis):
+        """The ground truth frequency and phase of the IF signal resulted from an object"""
         tof = dis/self.c
         return self.slope*tof, (2*np.pi*self.f1*tof-np.pi*self.slope*tof*tof+self.phase_shift)%(2*np.pi)
 
     def reflect(self, obj, sum=False, freqz=True):
-        '''Take (n, 3) obj, return one signal and frequency response'''
+        """Take (n, 3) obj, return one signal and frequency response"""
         if isinstance(obj, np.ndarray):
             n_obj = obj.shape[0]
             pos = obj
@@ -79,7 +99,7 @@ class Radar:
             freq = np.zeros((n_obj, 2))
         for i, pos_i in enumerate(pos):
             dis = self.dis_to(pos_i)
-            t = np.arange(0, self.chirp_time, 1/self.ADC_rate)
+            t = np.arange(0, self.chirp_time, 1/self.ADC_rate)[:n_sample]
             signal[i] = self.IF(t, dis)
             if freqz:
                 freq[i] = self.freqz(dis)
@@ -130,19 +150,19 @@ class Radar:
             freqzs = np.zeros((self.steps, n_total_objs, 2))
         cnt = 0
         snr = np.zeros((self.steps))
-        for obj in objs:
+        for obj in objs:    # for each point
             obj_path = obj.get_path()
             n_obj = obj.get_size()
-            for i in range(self.steps):
+            for i in range(self.steps): # for each chirp
                 pos = obj_path[i]
-                res = self.reflect(pos, sum=True, freqz=freqz)
+                res = self.reflect(pos, sum=True, freqz=freqz)  # compute the IF signal
                 if freqz:
                     signal[i] += res[0]
                     freqzs[i, cnt:cnt+n_obj] = res[1]
                 else:
                     signal[i] += res
-                snr[i] = 10*np.log10(self.signal_power(signal[i]))
-                if self.noise is not None:
+                snr[i] = 10*np.log10(self.signal_power(signal[i]))  # calcualte the snr
+                if self.noise is not None:  # add noise
                     # signal_power = np.mean(np.abs(signal)**2)
                     # print(signal_power)
                     # noise_power = signal_power*(1/(10**(self.snr/10)))
@@ -161,18 +181,30 @@ class Radar:
         return signal, info
 
     def register(self, time, fps):
+        """Register frame information"""
         if fps > 1/self.chirp_time:
-            print('Err: radar scanning rate is too high')
-            sys.exit(1)
+            raise ValueError('Radar scanning rate is too high')
         self.T = time
         self.fps = fps
         self.steps = int(time*fps)
 
     def signal_power(self, X):
+        """Get the power of a signal"""
         return np.mean(np.abs(X)**2)
 
 class RadarArray:
-    def __init__(self, Tx_pos, layout, f1=77e9, slope=40e12, ADC_rate=15e6, chirp_time=100e-6, noise=None):
+    """Radar module that defines the location and antenna configuration of the radar (1 transimiter N receiver)."""
+    def __init__(self, Tx_pos, layout: str, f1=77e9, slope=40e12, ADC_rate=15e6, chirp_time=100e-6, noise=None):
+        """
+        Parameters:
+            Tx_pos: location of the transimitter.
+            layout: layout name of the receivers, e.g. "1443". 
+            f1: chirp start frequency in Hz.
+            slope: chirp slope in Hz/s.
+            ADC_rate: ADC sampling rate in Hz.
+            chirp_time: the duration of a chirp in seconds.
+            noise: add a Gaussian white noise of power `noise` dB (in relative to the hardware thermal noise) to the simulation.   
+        """
         space = 3e8/f1/2    # wavelength / 2
         self.rxcfg = RxConfig(layout)
         self.radars = []

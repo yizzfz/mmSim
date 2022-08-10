@@ -14,8 +14,8 @@ computer_loc = {
 }
 
 class RadarTransform(BaseTransform):
-    r"""swap the y and z axis of the point cloud to align with radar coordinate system,
-    then place the point cloud 2m away from the radar.
+    r"""Swap the y and z axis of the point cloud to align with radar coordinate system,
+    then shift the point cloud to ensure postive distance.
     """
     def __init__(self):
         super().__init__()
@@ -27,6 +27,7 @@ class RadarTransform(BaseTransform):
         return data
 
 class Translate(BaseTransform):
+    """Translate the point cloud along y axis for a certain distance."""
     def __init__(self, dis):
         super().__init__()
         self.dis = dis
@@ -86,45 +87,54 @@ mesh_datasets = {
         'pretransform': DF()
     },
 }
-# https://github.com/Aaron-Zhao123/Sylveon/blob/master/sylveon/datasets/factory.py
-
 
 
 class Dataset:
-    """supported dataset: 'ShapeNet', 'ModelNet', 'S3DIS', 'FAUST', 'DynamicFAUST'
+    """Import 3D models as point clouds using pytorch geometric lib. Supported dataset: 'ShapeNet', 'ModelNet', 'FAUST', 'DynamicFAUST'
     """
     datasets = datasets
-    def __init__(self, name, n_samples=None, location=None, distance=2, train=False):
+    def __init__(self, name: str, n_samples=None, location=None, distance=2, train=False):
+        """
+        Parameters:
+            name: name of the dataset.
+            n_samples: how many points to sample from the dataset.
+            location: folder to save the dataset.
+            distance: the distance between point cloud and the radar.
+            train: `True` for train dataset and `False` for test dataset.
+        """
         if name not in self.datasets:
             raise ValueError('Incorrect dataset name')
         
         cls = getattr(torch_geometric.datasets, name)
+        # apply pre-defined transformation on dataset construction 
         pre_transform_func = self.datasets[name].get('pretransform')
         if pre_transform_func is not None:
             pre_transform_func = Compose([pre_transform_func, RadarTransform()])
         else:
             pre_transform_func = RadarTransform()
         if location is None:
-            computer_name = os.environ['COMPUTERNAME']
-            location = computer_loc.get(computer_name)      # random sample a number of points on every access
+            computer_name = os.environ['COMPUTERNAME']  # find default location by computer name
+            location = computer_loc.get(computer_name)
             if location is None:
                 raise ValueError
         transform_func = []
         if n_samples is not None:
-            transform_func.append(FixedPoints(n_samples, replace=False))
+            transform_func.append(FixedPoints(n_samples, replace=False))    # random sample a number of points on every access
         if distance != 0:
-            transform_func.append(Translate(distance))
+            transform_func.append(Translate(distance))                      # translate the points by a certain distance
         transform_func = Compose(transform_func) if transform_func != [] else None
         
         dataset_args = {
             'pre_transform': pre_transform_func,
             'transform': transform_func,
         }
+        # select train dataset or test dataset
         if name in ['ShapeNet']:
             dataset_args['split'] = 'trainval' if train else 'test'
         elif name in ['ModelNet', 'S3DIS', 'FAUST']:
             dataset_args['train'] = train
 
+        # load the dataset
         self.load(cls, location, name, **dataset_args)
 
         if name == 'DynamicFAUST':
@@ -135,6 +145,7 @@ class Dataset:
             self.dataset = self.dataset[idx]
 
     def load(self, cls, location, name, **args):
+        """Load the dataset using pytorch geometric backend"""
         self.dataset = cls(location + '/pointcloud/'+ name, **args)
 
     def __iter__(self):
@@ -147,7 +158,7 @@ class Dataset:
         return len(self.dataset)
 
 class DatasetMesh(Dataset):
-    """supported dataset: 'ModelNet', 'FAUST'
+    """Import 3D models as point clouds using pytorch geometric lib. Supported dataset: 'ModelNet', 'FAUST'
     """
     datasets = mesh_datasets
     def __init__(self, name, location=None, distance=2, train=False):
@@ -166,6 +177,7 @@ def view_room(i, ds):
     o3d.visualization.draw_geometries([pcd])
 
 def view_pc(i, ds):
+    """Display a point cloud using Open3D"""
     print(i)
     d1 = ds[i].pos.numpy()
     pcd = o3d.geometry.PointCloud()
@@ -173,6 +185,7 @@ def view_pc(i, ds):
     o3d.visualization.draw_geometries([pcd])
 
 def view_mesh(i, ds):
+    """Display a mesh model using Open3D"""
     print(i)
     d2 = ds[i]
     vertice = d2.pos.numpy()
@@ -183,6 +196,7 @@ def view_mesh(i, ds):
     o3d.visualization.draw_geometries([mesh])
 
 def view_both(i, ds1, ds2):
+    """Display both mesh model and point cloud"""
     print(i)
     d1 = ds1[i].pos.numpy()
     pcd = o3d.geometry.PointCloud()
@@ -197,6 +211,7 @@ def view_both(i, ds1, ds2):
     o3d.visualization.draw_geometries([pcd, mesh])
 
 def save_one_fig(obj, name):
+    """Take a snapshot of Open3D drawing"""
     param = o3d.io.read_pinhole_camera_parameters('../o3d-camera.json')
     vis = o3d.visualization.Visualizer()
     vis.create_window(width=480, height=640)
@@ -210,6 +225,7 @@ def save_one_fig(obj, name):
     vis.destroy_window()
 
 def save_figs(name):
+    """Take snapshots of all models in the dataset"""
     ds1 = Dataset(name, n_samples=1024, train=True)
     ds2 = DatasetMesh(name, train=True)
     for i in range(len(ds1)):
@@ -230,17 +246,5 @@ def save_figs(name):
         save_one_fig(mesh, figname)
 
 if __name__ == "__main__":
-    # save_figs('FAUST')
-    # save_figs('DynamicFAUST')
-    # ds1 = Dataset('FAUST', 512, train=True, distance=3)
-    # ds2 = DatasetMesh('FAUST', train=True, distance=1)
-    # for i in range(len(ds2)):
-    #     view_both(i, ds1, ds2)
-    # ds1 = Dataset('ModelNet')
     ds1 = Dataset('FAUST', train=True)
-    # ds2 = Dataset('DynamicFAUST', train=True)
-    import pdb; pdb.set_trace()
-    # view_pc(0, ds1)
-
-    # ds = Dataset('S3DIS')
-    # import pdb; pdb.set_trace()
+    view_pc(0, ds1)

@@ -74,7 +74,7 @@ def main():
     ax1.set_xlabel('Time (s)')
     ax1.set_ylabel('Signal Amplitude')
     ax1.set_title('IF signal in time domain')
-    ax1.set_ylim([-2, 2])
+    ax1.set_ylim([-100, 100])
     ax1.set_xlim([0, chirp_time])
 
     # fig 2 shows the FFT of the IF siganl
@@ -89,7 +89,7 @@ def main():
     # fig 3 plot the phase
     ax3 = plt.subplot(325)
     t1 = np.arange(0, simulation_period, 1/fps)
-    line3, = ax3.plot([], [], label='Real')
+    line3, = ax3.plot([], [], label='Ground Truth')
     line4, = ax3.plot([], [], label='Measured')
     ax3.set_xlabel('Time (s)')
     ax3.set_ylabel('Phase in pi')

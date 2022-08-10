@@ -1,9 +1,15 @@
 import numpy as np
 import scipy
 
-N_METRICS = 4
 class Evaluator:
+    """To evaluate the similarity between two point clouds"""
+    N_METRICS = 4
     def __init__(self, X, Y):
+        """
+        Parameters:
+            X: generated point cloud
+            Y: ground truth point cloud
+        """
         self.X = X
         self.Y = Y
         self.nx = X.shape[0]
@@ -26,7 +32,7 @@ class Evaluator:
         IoU = self.IoU(th, norm=norm)
         VIoU = self.VIoU(th)
         if print_result:
-            print(f'precision {precision*100:.2f}%, sensitivity {sensitivity*100:.2f}%, IoU {IoU*100:.2f}%, VIoU {VIoU*100:.2f}%.')
+            print(f'[npoints {self.nx}] precision {precision*100:.2f}%, sensitivity {sensitivity*100:.2f}%, IoU {IoU*100:.2f}%, VIoU {VIoU*100:.2f}%.')
         return VIoU, IoU, precision, sensitivity
 
     def precision(self, th):
@@ -63,6 +69,7 @@ class Evaluator:
         return (intersection1+intersection2)/union
 
     def VIoU(self, th):
+        """Intersection over union using voxelization"""
         VX = np.unique((self.X/th).astype(int), axis=0)
         VY = np.unique((self.Y/th).astype(int), axis=0)
         I = np.sum((VX[:, None] == VY).all(-1).any(-1))
@@ -72,7 +79,14 @@ class Evaluator:
         
 
 class VoxelEvaluator:
+    """To evaluate the similarity between two point clouds using voxelization"""
     def __init__(self, X, Y, voxel_size=0.1):
+        """
+        Parameters:
+            X: generated point cloud
+            Y: ground truth point cloud
+            voxel_size: size of a voxel, e.g. 0.1 = 0.1 m x 0.1 m x 0.1 m
+        """
         assert len(X.shape) == len(Y.shape) == 2
         assert X.shape[1] == Y.shape[1] == 3
         if not (X.shape[0] == 0 or X.shape[0] == 0):

@@ -51,8 +51,8 @@ def main():
 
     motion = Line((0, 0.5, 0))
 
-    dataset = Dataset('FAUST', n_samples=256, distance=2, train=True, location='d:/datasets/tmp/').dataset
-    ref = DatasetMesh('FAUST', distance=2, train=True, location='d:/datasets/tmp/')
+    dataset = Dataset('FAUST', n_samples=256, distance=2, train=True, location='d:/datasets/mmSim/').dataset
+    ref = DatasetMesh('FAUST', distance=2, train=True, location='d:/datasets/mmSim/')
     ts = datetime.datetime.now().strftime('%H:%M')
     print(f'[{ts}] Dataset loaded.')
     
@@ -66,14 +66,21 @@ def main():
     ts = datetime.datetime.now().strftime('%H:%M')
     print(f'[{ts}] Simulation start ...')
 
+    # get simulation data
     data = simulator.run()
     data = data.reshape((n_rx, n_frames, chirps_per_frame, samples_per_chirp))
     data = data[:, 0]   # take frame one
     ts = datetime.datetime.now().strftime('%H:%M')
     print(f'[{ts}] Simulation finished. Processing data...')
+
+    # construct a point cloud
     pcp = PointCloudProcessor(config, max_d=5, range_fft_m=4, n_aoa_fft=512)
     res = pcp.generate_point_cloud_with_doppler(data, method=AoA.mvdr, npass=2, debug=False)
+
+    # visualize the point cloud and the ground truth
     plot_point_cloud_o3d(res, mesh=mesh, video=False)
+
+    # evaluate the accuracy of the point cloud
     Evaluator(res, datapoints).run(print_result=True)
 
     
