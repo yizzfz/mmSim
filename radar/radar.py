@@ -2,11 +2,12 @@ import numpy as np
 import sys
 from collections.abc import Sequence
 from .rx_config import RxConfig
+from scipy.spatial.transform import Rotation as R
 
 class Radar:
     """Radar module that defines the location and antenna configuration of the radar (1 transimiter 1 receiver)."""
     cnt = 0
-    def __init__(self, Tx_pos=(0, 0, 0), Rx_pos=None, f1=77e9, slope=40e12, ADC_rate=15e6, chirp_time=100e-6, phase_shift=0, noise=None):
+    def __init__(self, Tx_pos=(0, 0, 0), Rx_pos=None, f1=77e9, slope=40e12, ADC_rate=15e6, chirp_time=100e-6, phase_shift=0, noise=None, angles=(0, 0, 0)):
         """
         Parameters:
             Tx_pos: location of the transimitter.
@@ -16,12 +17,17 @@ class Radar:
             ADC_rate: ADC sampling rate in Hz.
             chirp_time: the duration of a chirp in seconds.
             phase_shift: apply a phase shift to the antenna, default 0.
-            noise: add a Gaussian white noise of power `noise` dB (in relative to the hardware thermal noise) to the simulation.   
+            noise: add a Gaussian white noise of power `noise` dB (in relative to the hardware thermal noise) to the simulation. 
+            angles: extrinsic rotation angles in degrees in x-y-z. Positive for clockwise rotation. 
         """
         self.f1 = f1
         self.slope = slope
         self.Tx_pos = Tx_pos
-        self.Rx_pos = Rx_pos
+        if Rx_pos is not None:
+            self.Rx_pos = Rx_pos
+        else:
+            self.Rx_pos = Tx_pos
+        self.rotate(angles)
         self.tx_f = f1
         self.c = 3e8    # speed of light
         self.ADC_rate = ADC_rate
@@ -47,6 +53,13 @@ class Radar:
         type(self).cnt += 1
         # print(f'[{self.name}] configured to {f1/1e9:.1f} GHz to {(f1+slope*chirp_time)/1e9:.1f} GHz')
 
+    def rotate(self, angles):
+        if np.any(self.Rx_pos != self.Tx_pos):
+            RM = R.from_euler('XYZ', angles, degrees=True)
+            v = self.Rx_pos - self.Tx_pos
+            v = RM.apply(v)
+            self.Rx_pos = self.Tx_pos + v
+
     def A(self, d):
         """Calculate the amplitude of the signal reaching an object at distance `d`"""
         return np.sqrt(self.K/d**4)
@@ -67,10 +80,7 @@ class Radar:
     def dis_to(self, pos):
         """The round trip distance between the radar to an object"""
         dis1 = self.distance_between(self.Tx_pos, pos)
-        if self.Rx_pos is not None:
-            dis2 = self.distance_between(self.Rx_pos, pos)
-        else:
-            dis2 = dis1
+        dis2 = self.distance_between(self.Rx_pos, pos)
         return dis1+dis2
 
     def IF(self, t, dis):
@@ -194,7 +204,8 @@ class Radar:
 
 class RadarArray:
     """Radar module that defines the location and antenna configuration of the radar (1 transimiter N receiver)."""
-    def __init__(self, Tx_pos, layout: str, f1=77e9, slope=40e12, ADC_rate=15e6, chirp_time=100e-6, noise=None):
+
+    def __init__(self, Tx_pos, layout: str, f1=77e9, slope=40e12, ADC_rate=15e6, chirp_time=100e-6, noise=None, angles=(0, 0, 0)):
         """
         Parameters:
             Tx_pos: location of the transimitter.
@@ -204,13 +215,15 @@ class RadarArray:
             ADC_rate: ADC sampling rate in Hz.
             chirp_time: the duration of a chirp in seconds.
             noise: add a Gaussian white noise of power `noise` dB (in relative to the hardware thermal noise) to the simulation.   
+            angles: rotation angles (in degree) in x-y-z dimensions.  
         """
         space = 3e8/f1/2    # wavelength / 2
         self.rxcfg = RxConfig(layout)
         self.radars = []
+        self.Tx_pos = Tx_pos
         rx = self.rxcfg.rx*space
         for pos in rx:
-            self.radars.append(Radar(Tx_pos=Tx_pos, Rx_pos=pos, f1=f1, slope=slope, ADC_rate=ADC_rate, chirp_time=chirp_time, noise=noise))
+            self.radars.append(Radar(Tx_pos=Tx_pos, Rx_pos=Tx_pos+pos, f1=f1, slope=slope, ADC_rate=ADC_rate, chirp_time=chirp_time, noise=noise, angles=angles))
 
     def __len__(self):
         return len(self.radars)
@@ -224,3 +237,7 @@ class RadarArray:
 
     def get_rxconfig(self):
         return self.rxcfg
+
+    def get_pos(self):
+        rx = np.asarray([r.Rx_pos for r in self.radars])
+        return self.Tx_pos, rx
